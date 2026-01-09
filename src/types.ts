@@ -59,6 +59,8 @@ export interface GeoPoint {
   lon: number;
 }
 
+export type MapPoint = { x: number; y: number } | GeoPoint;
+
 export interface AppSettings {
   siteHeightFt: number;
   viewerHeightFt: number;
@@ -111,6 +113,8 @@ export interface ViewerDirection {
 
 export type RoadSource = "osm" | "custom";
 
+export type RoadOneway = boolean | -1 | 0 | 1;
+
 export type RoadClass =
   | "motorway"
   | "trunk"
@@ -120,15 +124,19 @@ export type RoadClass =
   | "residential"
   | "service"
   | "unclassified"
+  | "living_street"
+  | "motorway_link"
+  | "trunk_link"
+  | "primary_link"
+  | "secondary_link"
+  | "tertiary_link"
+  | "track"
   | "path"
+  | "cycleway"
+  | "footway"
+  | "pedestrian"
+  | "construction"
   | "other";
-
-export interface RoadDirectionLineStyle {
-  color?: string;
-  widthPx?: number;
-  offsetPx?: number;
-  dashPx?: number[];
-}
 
 export interface RoadHourlyDirectionalScore {
   hour: number;
@@ -139,35 +147,58 @@ export interface RoadHourlyDirectionalScore {
 export interface RoadTraffic {
   customCarsPerHour?: number;
   hourlyDirectionalScores?: RoadHourlyDirectionalScore[];
+  forward?: number;
+  backward?: number;
+}
+
+export interface RoadCustomTraffic {
+  forward?: number | null;
+  backward?: number | null;
 }
 
 export interface Road {
   id: string;
-  source: RoadSource;
-  points: GeoPoint[];
-  oneway: boolean;
-  class: RoadClass;
-  showDirectionLine: boolean;
-  directionLine?: RoadDirectionLineStyle;
+  source?: RoadSource;
+  points: MapPoint[];
+  oneway?: RoadOneway;
+  class?: RoadClass;
+  name?: string;
+  showDirectionLine?: boolean;
+  directionLine?: MapPoint[];
   traffic?: RoadTraffic;
+  customTraffic?: RoadCustomTraffic;
 }
 
 export interface Building {
   id: string;
-  footprint: GeoPoint[];
+  footprint: MapPoint[];
   height?: number;
   tags?: Record<string, string>;
 }
 
 export interface TrafficConfig {
-  mode: "disabled" | "custom";
-  defaultCarsPerHour: number;
-  hourlyMultipliers: number[];
+  preset: string;
+  hour: number;
+  detail: number;
+  showOverlay: boolean;
+  showDirectionArrows: boolean;
+  seed: number;
 }
 
+export interface TrafficDirectionalScores {
+  forward?: number;
+  reverse?: number;
+  total?: number;
+}
+
+export type TrafficByHour = Record<number, TrafficDirectionalScores>;
+export type TrafficByPreset = Record<string, TrafficByHour>;
+export type TrafficByRoadId = Record<string, TrafficByPreset>;
+
 export interface TrafficViewState {
-  layer: "none" | "volume" | "direction";
+  preset: string;
   hour: number;
+  showDirection: boolean;
 }
 
 export interface ProjectPayload {
@@ -194,3 +225,5 @@ export interface ProjectState {
   trafficConfig: TrafficConfig;
   trafficView: TrafficViewState;
 }
+
+export type AutosavePayload = ProjectPayload;
