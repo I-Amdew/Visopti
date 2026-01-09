@@ -1,0 +1,202 @@
+html,
+body {
+  height: 100%;
+}
+
+:root {
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  background-color: #1f2329;
+  color: #f2f2f2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  gap: 1rem;
+  padding: 1rem;
+  height: 100vh;
+}
+
+.canvas-wrapper {
+  position: relative;
+  flex: 1;
+  background: #000;
+  overflow: hidden;
+  height: 100%;
+}
+
+#mainCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.hidden {
+  display: none !important;
+}
+
+#controls {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: #2a2f37;
+  padding: 1rem;
+  border-radius: 12px;
+  border: 1px solid #3c414a;
+  overflow-y: auto;
+}
+
+#controls h2 {
+  margin: 0.5rem 0;
+  font-size: 1.1rem;
+  border-bottom: 1px solid #40454f;
+  padding-bottom: 0.3rem;
+}
+
+#controls h3 {
+  margin: 0.6rem 0 0.2rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #c6ccd7;
+}
+
+#controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+
+.checkbox-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+#controls input[type="number"] {
+  padding: 0.4rem;
+  border-radius: 6px;
+  border: 1px solid #555d68;
+  background: #161b22;
+  color: #f2f2f2;
+}
+
+#controls input[type="range"] {
+  width: 100%;
+}
+
+#progressContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+
+#progressLabel {
+  font-size: 0.85rem;
+  color: #cfd6e3;
+}
+
+#computeProgress {
+  width: 100%;
+  height: 6px;
+  border-radius: 4px;
+}
+
+.button-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.button-grid button,
+.control-buttons button,
+#btnExportProject {
+  padding: 0.35rem;
+  border-radius: 6px;
+  border: 1px solid #4c5561;
+  background: #1c222b;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.button-grid button.active {
+  background: #2e8bff;
+  border-color: #5ea3ff;
+}
+
+.control-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+#importFile {
+  margin-top: 0.25rem;
+}
+
+#importFile::-webkit-file-upload-button {
+  background: #1c222b;
+  border: 1px solid #4c5561;
+  color: #f2f2f2;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.import-label {
+  font-size: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+#warningBanner {
+  background: #3c2a2a;
+  color: #f6c6c6;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid #6d3f3f;
+  font-size: 0.85rem;
+}
+
+#statusOverlay {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.5rem;
+  background: rgba(0, 0, 0, 0.65);
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  pointer-events: none;
+  white-space: pre-line;
+}
+
+#statusMessage {
+  min-height: 1.5rem;
+  font-size: 0.85rem;
+  color: #9bd18b;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

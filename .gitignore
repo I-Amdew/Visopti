@@ -1,0 +1,7 @@
+node_modules/
+dist/
+public/Assets/
+.local-node/
+npm
+node
+npx
