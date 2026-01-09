@@ -1,3 +1,5 @@
+import type { TileSourceId } from "./mapTiles";
+
 export type ZoneType = "obstacle" | "candidate" | "viewer";
 
 export interface ShapeBase {
@@ -52,6 +54,11 @@ export interface GeoBounds {
   west: number;
 }
 
+export interface GeoPoint {
+  lat: number;
+  lon: number;
+}
+
 export interface AppSettings {
   siteHeightFt: number;
   viewerHeightFt: number;
@@ -100,4 +107,90 @@ export interface OpacitySettings {
 export interface ViewerDirection {
   angleRad: number;
   coneRad: number;
+}
+
+export type RoadSource = "osm" | "custom";
+
+export type RoadClass =
+  | "motorway"
+  | "trunk"
+  | "primary"
+  | "secondary"
+  | "tertiary"
+  | "residential"
+  | "service"
+  | "unclassified"
+  | "path"
+  | "other";
+
+export interface RoadDirectionLineStyle {
+  color?: string;
+  widthPx?: number;
+  offsetPx?: number;
+  dashPx?: number[];
+}
+
+export interface RoadHourlyDirectionalScore {
+  hour: number;
+  forward: number;
+  backward: number;
+}
+
+export interface RoadTraffic {
+  customCarsPerHour?: number;
+  hourlyDirectionalScores?: RoadHourlyDirectionalScore[];
+}
+
+export interface Road {
+  id: string;
+  source: RoadSource;
+  points: GeoPoint[];
+  oneway: boolean;
+  class: RoadClass;
+  showDirectionLine: boolean;
+  directionLine?: RoadDirectionLineStyle;
+  traffic?: RoadTraffic;
+}
+
+export interface Building {
+  id: string;
+  footprint: GeoPoint[];
+  height?: number;
+  tags?: Record<string, string>;
+}
+
+export interface TrafficConfig {
+  mode: "disabled" | "custom";
+  defaultCarsPerHour: number;
+  hourlyMultipliers: number[];
+}
+
+export interface TrafficViewState {
+  layer: "none" | "volume" | "direction";
+  hour: number;
+}
+
+export interface ProjectPayload {
+  schemaVersion: number;
+  bounds: GeoBounds | null;
+  basemapId: TileSourceId;
+  settings: AppSettings;
+  shapes: Shape[];
+  autoRoads?: Road[];
+  autoBuildings?: Building[];
+  customRoads?: Road[];
+  trafficConfig?: TrafficConfig;
+  trafficView?: TrafficViewState;
+}
+
+export interface ProjectState {
+  bounds: GeoBounds | null;
+  basemapId: TileSourceId;
+  settings: AppSettings;
+  shapes: Shape[];
+  autoRoads: Road[];
+  autoBuildings: Building[];
+  customRoads: Road[];
+  trafficConfig: TrafficConfig;
+  trafficView: TrafficViewState;
 }

@@ -10,7 +10,10 @@ type TrafficWorkerRequest =
 
 type TrafficWorkerControl = { type: "cancel" };
 
-const ctx = self as unknown as {\n  postMessage: (message: unknown) => void;\n  onmessage: ((event: MessageEvent) => void) | null;\n};
+const ctx = self as unknown as {
+  postMessage: (message: unknown) => void;
+  onmessage: ((event: MessageEvent) => void) | null;
+};
 
 let cancelled = false;
 
