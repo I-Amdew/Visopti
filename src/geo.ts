@@ -1,6 +1,4 @@
-import { GeoReference } from "./types";
-
-const FEET_TO_METERS = 0.3048;
+import { GeoBounds, GeoReference } from "./types";
 
 export interface ElevationGrid {
   rows: number;
@@ -14,141 +12,21 @@ export interface ElevationGrid {
   maxElevation: number;
 }
 
-export async function loadGeoReference(
-  path = "Assets/image_georeference.json"
-): Promise<GeoReference> {
-  const response = await fetch(path);
-  if (!response.ok) {
-    throw new Error(`Failed to load georeference JSON: ${response.status}`);
-  }
-  return response.json();
-}
-
-export async function loadElevationGrid(geo: GeoReference): Promise<ElevationGrid> {
-  const csvFilename = geo.elevation_data.csv_filename;
-  const response = await fetch(`Assets/${csvFilename}`);
-  if (!response.ok) {
-    throw new Error(`Failed to load elevation CSV: ${response.status}`);
-  }
-  const text = await response.text();
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  if (lines.length <= 1) {
-    throw new Error("CSV missing data rows");
-  }
-
-  const header = parseCsvLine(lines[0]);
-  const normalizedHeader = header.map(normalizeHeaderName);
-
-  const latIndex = findHeaderIndex(normalizedHeader, ["latitude", "lat"]);
-  const lonIndex = findHeaderIndex(normalizedHeader, ["longitude", "lon"]);
-  const elevationIndex = findHeaderIndex(normalizedHeader, [
-    "elevation_m",
-    "elevation",
-    "elevation (m)",
-    "elevation_meters",
-    "elev_m",
-    "elev (m)",
-  ]);
-  const elevationFeetIndex = findHeaderIndex(normalizedHeader, [
-    "elevation_ft",
-    "elevation (ft)",
-    "elev_ft",
-    "elevation_feet",
-  ]);
-
-  if (latIndex === -1 || lonIndex === -1) {
-    throw new Error(
-      `CSV missing latitude/longitude columns. Saw headers: ${header.join(", ")}`
-    );
-  }
-  if (elevationIndex === -1 && elevationFeetIndex === -1) {
-    throw new Error(
-      `CSV missing elevation column in metres/feet. Saw headers: ${header.join(", ")}`
-    );
-  }
-
-  const latSet = new Set<number>();
-  const lonSet = new Set<number>();
-  const valueMap = new Map<string, number>();
-
-  for (let i = 1; i < lines.length; i += 1) {
-    const cols = parseCsvLine(lines[i]);
-    const lat = parseFloat(cols[latIndex]);
-    const lon = parseFloat(cols[lonIndex]);
-    const elevMeters =
-      elevationIndex !== -1 ? parseFloat(cols[elevationIndex]) : Number.NaN;
-    const elevFeet =
-      elevationFeetIndex !== -1 ? parseFloat(cols[elevationFeetIndex]) : Number.NaN;
-    const elev = Number.isFinite(elevMeters)
-      ? elevMeters
-      : Number.isFinite(elevFeet)
-        ? elevFeet * FEET_TO_METERS
-        : Number.NaN;
-    if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(elev)) {
-      latSet.add(lat);
-      lonSet.add(lon);
-      valueMap.set(gridKey(lat, lon), elev);
-    }
-  }
-
-  if (latSet.size === 0 || lonSet.size === 0) {
-    throw new Error("CSV missing latitude/longitude rows");
-  }
-
-  const latitudesAscending = Array.from(latSet).sort((a, b) => a - b);
-  const longitudesAscending = Array.from(lonSet).sort((a, b) => a - b);
-
-  const layout = geo.elevation_data.grid_layout;
-  const warnIfMismatch = (expected: number, actual: number, label: string) => {
-    if (expected > 0 && expected !== actual) {
-      console.warn(
-        `[geo] ${label} mismatch: metadata=${expected}, CSV=${actual}. Using CSV count.`
-      );
-    }
-  };
-  warnIfMismatch(layout.rows, latitudesAscending.length, "row count");
-  warnIfMismatch(layout.cols, longitudesAscending.length, "column count");
-
-  const latitudes = layout.lat_sorted_ascending
-    ? latitudesAscending
-    : [...latitudesAscending].reverse();
-  const longitudes = layout.lon_sorted_ascending
-    ? longitudesAscending
-    : [...longitudesAscending].reverse();
-
-  const values = latitudes.map((lat) =>
-    longitudes.map((lon) => {
-      const key = gridKey(lat, lon);
-      const val = valueMap.get(key);
-      if (typeof val !== "number") {
-        throw new Error(`Missing elevation for lat ${lat} lon ${lon}`);
-      }
-      return val;
-    })
-  );
-
-  let minElevation = Number.POSITIVE_INFINITY;
-  let maxElevation = Number.NEGATIVE_INFINITY;
-  for (const row of values) {
-    for (const val of row) {
-      if (val < minElevation) minElevation = val;
-      if (val > maxElevation) maxElevation = val;
-    }
-  }
-
+export function createGeoReference(
+  bounds: GeoBounds,
+  imageSize: { width: number; height: number }
+): GeoReference {
   return {
-    rows: latitudes.length,
-    cols: longitudes.length,
-    latitudes,
-    longitudes,
-    values,
-    latAscending: layout.lat_sorted_ascending,
-    lonAscending: layout.lon_sorted_ascending,
-    minElevation,
-    maxElevation,
+    image: {
+      width_px: imageSize.width,
+      height_px: imageSize.height,
+    },
+    bounds: {
+      lat_max_north: bounds.north,
+      lat_min_south: bounds.south,
+      lon_min_west: bounds.west,
+      lon_max_east: bounds.east,
+    },
   };
 }
 
@@ -292,22 +170,6 @@ export class GeoMapper {
       this.lonCache[x] = lon_min_west + fx * lonRange;
     }
   }
-}
-
-function gridKey(lat: number, lon: number): string {
-  return `${lat.toFixed(8)}|${lon.toFixed(8)}`;
-}
-
-function parseCsvLine(line: string): string[] {
-  return line.split(",").map((part) => part.replace(/\uFEFF/g, "").trim());
-}
-
-function normalizeHeaderName(name: string): string {
-  return name.replace(/^\uFEFF/, "").trim().toLowerCase();
-}
-
-function findHeaderIndex(headers: string[], candidates: string[]): number {
-  return headers.findIndex((header) => candidates.includes(header));
 }
 
 function lerp(a: number, b: number, t: number): number {

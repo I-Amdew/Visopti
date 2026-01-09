@@ -1,32 +1,27 @@
 # Food Truck Visibility
 
-Interactive tool for exploring where a food truck can be placed on a site map while visualizing viewer/candidate locations, obstacles, contours, and visibility heatmaps.
+Food Truck Visibility is a visual planning tool for figuring out where a food truck can go and who can see it. Use the map to pick any location, lock the frame, load topography from a live API, and then sketch viewer, candidate, and obstacle zones directly on the canvas.
 
-## Prerequisites
-- Node.js 18+ (matches Vite support matrix)
-- npm
+## Why it’s useful
+- **Anywhere on the map.** Pan and zoom to any place, lock the view, and the canvas updates to that exact frame.
+- **Terrain-aware.** Elevation data is pulled on demand so visibility reflects real topography.
+- **Designed for quick decisions.** Draw zones, compute heatmaps, and export projects without leaving the browser.
 
-## Setup
-```bash
-npm install
-```
+## Quick start
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Start the dev server:
+   ```bash
+   npm run dev
+   ```
+3. Open the local URL shown in the terminal (usually http://localhost:5173).
 
-Project assets (imagery, elevation grid, etc.) live in `Assets/` and are copied to `public/Assets` by the helper script. The sync runs automatically before `dev`, `build`, and `preview`, but you can trigger it manually after changing assets:
-```bash
-npm run sync-assets
-```
+For hands-on steps, see **[USAGE.md](./USAGE.md)**.
 
-## Run the app locally
-```bash
-npm run dev
-```
-Then open the printed local URL (defaults to http://localhost:5173).
+## How map + topography work
+When you lock the map frame, the app captures the current map bounds, fetches elevation data from the Open-Meteo Elevation API, and renders OpenStreetMap tiles into the canvas. That means the frame of reference is always the exact area you’re zoomed into.
 
-## Build for production
-```bash
-npm run build
-```
-Preview the built output locally:
-```bash
-npm run preview
-```
+## License
+This project is released under the MIT License, so you can use it however you want. See [LICENSE](./LICENSE).

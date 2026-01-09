@@ -33,9 +33,9 @@ export type Shape = RectShape | EllipseShape | PolygonShape;
 
 export interface GeoReference {
   image: {
-    filename: string;
     width_px: number;
     height_px: number;
+    filename?: string;
   };
   bounds: {
     lat_max_north: number;
@@ -43,28 +43,13 @@ export interface GeoReference {
     lon_min_west: number;
     lon_max_east: number;
   };
-  mapping_convention?: {
-    pixel_origin: string;
-    pixel_center_coordinates: boolean;
-    lat_formula: string;
-    lon_formula: string;
-    pixel_coordinate_definition?: {
-      x: string;
-      y: string;
-    };
-  };
-  elevation_data: {
-    csv_filename: string;
-    grid_layout: GridLayout;
-  };
 }
 
-export interface GridLayout {
-  rows: number;
-  cols: number;
-  lat_sorted_ascending: boolean;
-  lon_sorted_ascending: boolean;
-  grid_indexing?: string;
+export interface GeoBounds {
+  north: number;
+  south: number;
+  east: number;
+  west: number;
 }
 
 export interface AppSettings {

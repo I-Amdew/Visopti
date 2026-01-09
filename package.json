@@ -1,7 +1,6 @@
 {
   "name": "food-truck-visibility",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "scripts": {
     "sync-assets": "node scripts/sync-assets.mjs",

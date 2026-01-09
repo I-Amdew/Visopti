@@ -26,9 +26,11 @@ export type ToolMode =
   | "drawCandidatePolygon"
   | "drawViewerPolygon";
 
+type BaseImage = CanvasImageSource & { width: number; height: number };
+
 interface DrawingManagerOptions {
   canvas: HTMLCanvasElement;
-  image: HTMLImageElement;
+  image: BaseImage;
   onShapesChanged?: (shapes: Shape[]) => void;
   onPointerMove?: (pixel: { x: number; y: number } | null) => void;
   onInteraction?: () => void;
@@ -99,6 +101,7 @@ export interface DrawingManager {
   clearShapes(): void;
   getTool(): ToolMode;
   setTool(tool: ToolMode): void;
+  setBaseImage(image: BaseImage, options?: { resetView?: boolean }): void;
   setHeatmap(cells: HeatmapCell[] | null, cellSize: number): void;
   clearHeatmap(): void;
   setHeatmapOpacity(value: number): void;
@@ -120,8 +123,9 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
   }
   const ctx = context;
 
-  const baseWidth = image.width;
-  const baseHeight = image.height;
+  let baseImage: BaseImage = image;
+  let baseWidth = image.width;
+  let baseHeight = image.height;
   const state: DrawingManagerState = {
     shapes: [],
     heatmapData: null,
@@ -179,7 +183,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     ctx.save();
     const appliedScale = state.view.scale * state.view.baseScale;
     ctx.setTransform(appliedScale, 0, 0, appliedScale, state.view.offsetX, state.view.offsetY);
-    ctx.drawImage(image, 0, 0, baseWidth, baseHeight);
+    ctx.drawImage(baseImage, 0, 0, baseWidth, baseHeight);
     if (state.shadingBitmap) {
       ctx.drawImage(state.shadingBitmap, 0, 0, baseWidth, baseHeight);
     }
@@ -616,6 +620,17 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
         finishViewerConeEdit(false);
       }
       redraw();
+    },
+    setBaseImage(nextImage: BaseImage, options?: { resetView?: boolean }) {
+      baseImage = nextImage;
+      baseWidth = nextImage.width;
+      baseHeight = nextImage.height;
+      if (options?.resetView) {
+        state.view.scale = 1;
+        state.view.offsetX = 0;
+        state.view.offsetY = 0;
+      }
+      resizeCanvas();
     },
     setHeatmap(cells: HeatmapCell[] | null, cellSize: number) {
       if (cells && cells.length > 0) {
