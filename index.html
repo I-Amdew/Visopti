@@ -5,15 +5,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Food Truck Visibility</title>
     <link rel="icon" href="data:,">
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      crossorigin=""
+    />
     <link rel="stylesheet" href="/styles.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   </head>
   <body>
     <div id="app">
-      <div class="canvas-wrapper">
-        <canvas id="mainCanvas" width="800" height="600"></canvas>
-        <div id="statusOverlay">Loading…</div>
+      <div id="workspace">
+        <div class="map-wrapper">
+          <div id="mapView"></div>
+          <div id="mapStatus" class="map-status">Frame unlocked: pan/zoom to set a new reference.</div>
+        </div>
+        <div class="canvas-wrapper">
+          <canvas id="mainCanvas" width="800" height="600"></canvas>
+          <div id="statusOverlay">Loading…</div>
+        </div>
       </div>
       <section id="controls">
+        <h2>Map & Terrain</h2>
+        <p class="hint">
+          Pan/zoom the map to set your frame, lock it, then load topography to sync the canvas.
+        </p>
+        <div class="control-buttons">
+          <button id="btnLockFrame">Lock frame</button>
+          <button id="btnLoadTopography">Load topography</button>
+        </div>
+
         <h2>Tools</h2>
         <div id="toolButtons" class="button-grid">
           <button data-tool="select" class="active">Select</button>

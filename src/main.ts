@@ -1,6 +1,6 @@
 import { createDrawingManager, ToolMode } from "./drawing";
-import { AppSettings, Shape } from "./types";
-import { GeoMapper, loadElevationGrid, loadGeoReference } from "./geo";
+import { AppSettings, GeoBounds, Shape } from "./types";
+import { createGeoReference, GeoMapper } from "./geo";
 import {
   computeVisibilityHeatmap,
   computeShadingOverlay,
@@ -9,39 +9,47 @@ import {
   sampleViewerPoints
 } from "./visibility";
 import { generateContourSegments } from "./contours";
-import { loadGoogleApiScript } from "./googleScripts";
+import { renderMapFrameImage } from "./mapTiles";
+import { createMapView } from "./mapView";
+import { fetchElevationGrid } from "./topography";
+
+type MapViewInstance = ReturnType<typeof createMapView>;
 
 async function init() {
   const canvas = document.getElementById("mainCanvas") as HTMLCanvasElement | null;
   const statusOverlay = document.getElementById("statusOverlay");
   const statusMessage = document.getElementById("statusMessage");
   const warningBanner = document.getElementById("warningBanner");
+  const mapContainer = document.getElementById("mapView") as HTMLDivElement | null;
+  const mapStatus = document.getElementById("mapStatus");
+  const btnLockFrame = document.getElementById("btnLockFrame") as HTMLButtonElement | null;
+  const btnLoadTopography = document.getElementById("btnLoadTopography") as HTMLButtonElement | null;
   if (!canvas || !statusOverlay || !statusMessage) {
     throw new Error("Missing core DOM elements");
+  }
+  if (!mapContainer || !mapStatus || !btnLockFrame || !btnLoadTopography) {
+    throw new Error("Map controls missing from DOM");
   }
 
   const statusOverlayEl = statusOverlay;
   const statusMessageEl = statusMessage;
+  const warningBannerEl = warningBanner;
+  const mapStatusEl = mapStatus;
 
-  statusOverlayEl.textContent = "Loading assets…";
+  statusOverlayEl.textContent = "Zoom the map to pick your frame.";
+  const mapView = createMapView(mapContainer);
 
-  const googleScriptsLoad = loadGoogleApiScript();
-
-  const geo = await loadGeoReference();
-  const grid = await loadElevationGrid(geo);
-  const mapper = new GeoMapper(geo, grid);
-  const baseImage = await loadImage(`Assets/${mapper.geo.image.filename}`);
-  const contourSegments = generateContourSegments(mapper, 1);
-
-  canvas.width = mapper.geo.image.width_px;
-  canvas.height = mapper.geo.image.height_px;
+  const placeholderImage = createPlaceholderCanvas(1200, 800);
 
   const settings = createDefaultSettings();
   let lastPointer: { x: number; y: number } | null = null;
   let pendingInterrupt: () => void = () => {};
+  let mapper: GeoMapper | null = null;
+  let currentBounds: GeoBounds | null = null;
+  let frameLocked = false;
   const drawingManager = createDrawingManager({
     canvas,
-    image: baseImage,
+    image: placeholderImage,
     onShapesChanged: (shapes) => shapeChangeHandler(shapes),
     onPointerMove: (pixel) => updateStatusOverlay(pixel),
     onInteraction: () => pendingInterrupt()
@@ -51,7 +59,11 @@ async function init() {
   function updateStatusOverlay(pixel: { x: number; y: number } | null) {
     const toolName = friendlyToolName(drawingManager.getTool());
     let text = `Tool: ${toolName}`;
-    if (pixel) {
+    if (!mapper) {
+      text += "\nTerrain: (load map frame to enable)";
+      text += "\nPixel: (–, –)";
+      lastPointer = null;
+    } else if (pixel) {
       const clampedX = clamp(pixel.x, 0, mapper.geo.image.width_px - 1);
       const clampedY = clamp(pixel.y, 0, mapper.geo.image.height_px - 1);
       const { lat, lon } = mapper.pixelToLatLon(clampedX, clampedY);
@@ -76,26 +88,89 @@ async function init() {
   setupSettings(settings, drawingManager, {
     interruptComputations: () => pendingInterrupt()
   });
-  const actionControls = setupActions(drawingManager, settings, mapper, statusMessageEl, {
+  const actionControls = setupActions(drawingManager, settings, () => mapper, statusMessageEl, {
     onShadingComplete: () => {}
   });
-  setupDebugProbe(canvas, mapper, () => lastPointer);
+  setupDebugProbe(canvas, () => mapper, () => lastPointer);
   pendingInterrupt = () => {
     actionControls.cancelHeatmap();
   };
-  drawingManager.setContours(contourSegments);
+  drawingManager.setContours(null);
   drawingManager.setContourOpacity(settings.opacity.contours);
   drawingManager.setShowContours(settings.overlays.showContours);
+  actionControls.setTopographyReady(false);
 
   updateStatusOverlay(null);
 
-  googleScriptsLoad.then((result) => {
-    if (!result.ok && warningBanner) {
-      warningBanner.textContent =
-        "Google scripts failed to load; browser or network privacy settings may be blocking them. Google-powered features will be disabled.";
-      warningBanner.classList.remove("hidden");
+  const updateFrameStatus = () => {
+    if (frameLocked && currentBounds) {
+      mapStatusEl.textContent = `Frame locked: N ${currentBounds.north.toFixed(4)} · S ${currentBounds.south.toFixed(4)} · W ${currentBounds.west.toFixed(4)} · E ${currentBounds.east.toFixed(4)}`;
+    } else {
+      mapStatusEl.textContent = "Frame unlocked: pan/zoom to set a new reference.";
+    }
+  };
+
+  const setWarning = (message: string | null) => {
+    if (!warningBannerEl) return;
+    if (message) {
+      warningBannerEl.textContent = message;
+      warningBannerEl.classList.remove("hidden");
+    } else {
+      warningBannerEl.textContent = "";
+      warningBannerEl.classList.add("hidden");
+    }
+  };
+
+  const refreshTopography = async () => {
+    if (!frameLocked) {
+      statusMessageEl.textContent = "Lock the map frame before loading topography.";
+      return;
+    }
+    const bounds = mapView.getBounds();
+    const { frame, gridRows, gridCols } = buildMapFrame(mapView, bounds);
+    statusMessageEl.textContent = "Fetching map tiles and terrain…";
+    statusOverlayEl.textContent = "Loading map tiles…";
+    setWarning(null);
+    try {
+      const [mapImage, elevationGrid] = await Promise.all([
+        renderMapFrameImage(frame),
+        fetchElevationGrid(bounds, gridRows, gridCols),
+      ]);
+      const geo = createGeoReference(bounds, { width: frame.width, height: frame.height });
+      mapper = new GeoMapper(geo, elevationGrid);
+      currentBounds = bounds;
+      drawingManager.setBaseImage(mapImage, { resetView: true });
+      drawingManager.clearShapes();
+      drawingManager.clearHeatmap();
+      drawingManager.setShading(null, Math.max(2, Math.floor(settings.sampleStepPx)));
+      drawingManager.setContours(generateContourSegments(mapper, 1));
+      actionControls.setTopographyReady(true);
+      statusMessageEl.textContent = "Topography loaded.";
+    } catch (err) {
+      console.error(err);
+      statusMessageEl.textContent = `Topography load failed: ${(err as Error).message}`;
+      setWarning("Unable to load map tiles or elevation data. Check your network and try again.");
+    } finally {
+      updateStatusOverlay(null);
+      updateFrameStatus();
+    }
+  };
+
+  btnLockFrame.addEventListener("click", async () => {
+    frameLocked = !frameLocked;
+    mapView.setLocked(frameLocked);
+    btnLockFrame.textContent = frameLocked ? "Unlock frame" : "Lock frame";
+    updateFrameStatus();
+    if (frameLocked) {
+      await refreshTopography();
     }
   });
+
+  btnLoadTopography.addEventListener("click", async () => {
+    await refreshTopography();
+  });
+
+  updateFrameStatus();
 }
 
 function setupTools(
@@ -230,11 +305,12 @@ function setupSettings(
 function setupActions(
   drawingManager: ReturnType<typeof createDrawingManager>,
   settings: AppSettings,
-  mapper: GeoMapper,
+  getMapper: () => GeoMapper | null,
   statusMessage: HTMLElement,
   hooks?: { onShadingComplete?: () => void }
-): { cancelHeatmap: () => void } {
+): { cancelHeatmap: () => void; setTopographyReady: (ready: boolean) => void } {
   let heatmapComputeToken = 0;
+  let topographyReady = false;
   const btnCompute = document.getElementById("btnComputeHeatmap") as HTMLButtonElement | null;
   const btnComputeShade = document.getElementById("btnComputeShading") as HTMLButtonElement | null;
   const btnClearHeatmap = document.getElementById("btnClearHeatmap") as HTMLButtonElement | null;
@@ -280,10 +356,15 @@ function setupActions(
   const cancelHeatmap = () => {
     heatmapComputeToken += 1;
     hideProgress();
-    btnCompute.disabled = false;
+    btnCompute.disabled = !topographyReady;
   };
 
   btnCompute.addEventListener("click", async () => {
+    const mapper = getMapper();
+    if (!mapper) {
+      statusMessage.textContent = "Load topography before computing visibility.";
+      return;
+    }
     btnCompute.disabled = true;
     showProgress("Computing heatmap…");
     statusMessage.textContent = "Computing visibility heatmap…";
@@ -298,7 +379,7 @@ function setupActions(
       for (let i = 0; i < passSteps.length; i += 1) {
         if (token !== heatmapComputeToken) {
           hideProgress();
-          btnCompute.disabled = false;
+          btnCompute.disabled = !topographyReady;
           return;
         }
         const step = passSteps[i];
@@ -310,7 +391,7 @@ function setupActions(
           drawingManager.clearHeatmap();
           drawingManager.setShading(null, step);
           hideProgress();
-          btnCompute.disabled = false;
+          btnCompute.disabled = !topographyReady;
           return;
         }
         const heatmap = computeVisibilityHeatmap(
@@ -322,7 +403,7 @@ function setupActions(
         );
         if (token !== heatmapComputeToken) {
           hideProgress();
-          btnCompute.disabled = false;
+          btnCompute.disabled = !topographyReady;
           return;
         }
         drawingManager.setHeatmap(heatmap, Math.max(1, tempSettings.sampleStepPx));
@@ -338,11 +419,16 @@ function setupActions(
       statusMessage.textContent = `Heatmap error: ${(err as Error).message}`;
       hideProgress();
     } finally {
-      btnCompute.disabled = false;
+      btnCompute.disabled = !topographyReady;
     }
   });
 
   btnComputeShade.addEventListener("click", async () => {
+    const mapper = getMapper();
+    if (!mapper) {
+      statusMessage.textContent = "Load topography before computing blindspots.";
+      return;
+    }
     btnComputeShade.disabled = true;
     showProgress("Computing blindspots…");
     statusMessage.textContent = "Computing blindspot visibility…";
@@ -356,7 +442,7 @@ function setupActions(
       for (let i = 0; i < shadingSteps.length; i += 1) {
         if (token !== heatmapComputeToken) {
           hideProgress();
-          btnComputeShade.disabled = false;
+          btnComputeShade.disabled = !topographyReady;
           return;
         }
         const step = shadingSteps[i];
@@ -366,7 +452,7 @@ function setupActions(
           drawingManager.setShading(null, step);
           statusMessage.textContent = "Need at least one viewer zone to compute blindspots.";
           hideProgress();
-          btnComputeShade.disabled = false;
+          btnComputeShade.disabled = !topographyReady;
           return;
         }
         const mapSamples = sampleMapGridPoints(tempSettings, mapper);
@@ -379,7 +465,7 @@ function setupActions(
         );
         if (token !== heatmapComputeToken) {
           hideProgress();
-          btnComputeShade.disabled = false;
+          btnComputeShade.disabled = !topographyReady;
           return;
         }
         drawingManager.setShading(shadingCells, Math.max(1, tempSettings.sampleStepPx));
@@ -395,7 +481,7 @@ function setupActions(
       statusMessage.textContent = `Shademap error: ${(err as Error).message}`;
       hideProgress();
     } finally {
-      btnComputeShade.disabled = false;
+      btnComputeShade.disabled = !topographyReady;
     }
   });
 
@@ -489,16 +575,26 @@ function setupActions(
     }
   });
 
-  return { cancelHeatmap };
+  const setTopographyReady = (ready: boolean) => {
+    topographyReady = ready;
+    btnCompute.disabled = !ready;
+    btnComputeShade.disabled = !ready;
+  };
+
+  return { cancelHeatmap, setTopographyReady };
 }
 
 function setupDebugProbe(
   canvas: HTMLCanvasElement,
-  mapper: GeoMapper,
+  getMapper: () => GeoMapper | null,
   getPointer: () => { x: number; y: number } | null
 ) {
   const METERS_TO_FEET = 3.280839895013123;
   canvas.addEventListener("click", () => {
+    const mapper = getMapper();
+    if (!mapper) {
+      return;
+    }
     const pointer = getPointer();
     if (!pointer) {
       return;
@@ -584,6 +680,50 @@ function friendlyToolName(tool: ToolMode): string {
   return lookup[tool];
 }
 
+function buildMapFrame(mapView: MapViewInstance, bounds: GeoBounds) {
+  const size = mapView.getSize();
+  const dpr = window.devicePixelRatio || 1;
+  let width = Math.max(400, Math.round(size.width * dpr));
+  let height = Math.max(300, Math.round(size.height * dpr));
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(width, height));
+  width = Math.max(1, Math.round(width * scale));
+  height = Math.max(1, Math.round(height * scale));
+  const gridRows = Math.min(64, Math.max(20, Math.round(height / 24)));
+  const gridCols = Math.min(64, Math.max(20, Math.round(width / 24)));
+  return {
+    frame: {
+      bounds,
+      zoom: mapView.getZoom(),
+      width,
+      height
+    },
+    gridRows,
+    gridCols
+  };
+}
+
+function createPlaceholderCanvas(width: number, height: number): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return canvas;
+  }
+  ctx.fillStyle = "#1b1f26";
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = "#2f3742";
+  ctx.fillRect(0, 0, width, 48);
+  ctx.fillStyle = "#9aa3af";
+  ctx.font = "20px 'Segoe UI', sans-serif";
+  ctx.fillText("Map frame not loaded yet", 20, 32);
+  ctx.fillStyle = "#6b7280";
+  ctx.font = "14px 'Segoe UI', sans-serif";
+  ctx.fillText("Use the map above to pick a frame, then lock and load topography.", 20, 70);
+  return canvas;
+}
+
 function createDefaultSettings(): AppSettings {
   return {
     truckHeightFt: 6,
@@ -614,15 +754,6 @@ function clamp(value: number, min: number, max: number): number {
 
 function delayFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-}
-
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = (err) => reject(err);
-    img.src = src;
-  });
 }
 
 void init().catch((err) => {
