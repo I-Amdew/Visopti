@@ -47,7 +47,7 @@ export function shouldIgnoreGlobalKeyEvents(activeEl: Element | null): boolean {
     return false;
   }
   const tagName = activeEl.tagName?.toUpperCase() ?? "";
-  if (tagName === "INPUT" || tagName === "TEXTAREA") {
+  if (tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT") {
     return true;
   }
   const editable = (activeEl as HTMLElement).isContentEditable;
@@ -73,6 +73,12 @@ export type ToolMode =
 
 export type RoadToolMode = "off" | "edit";
 
+export interface RoadEditSelection {
+  roadId: string | null;
+  pointIndex: number | null;
+  hasDraft: boolean;
+}
+
 type BaseImage = CanvasImageSource & { width: number; height: number };
 
 interface DrawingManagerOptions {
@@ -82,6 +88,7 @@ interface DrawingManagerOptions {
   onPointerMove?: (pixel: { x: number; y: number } | null) => void;
   onInteraction?: () => void;
   onRoadSelectionChanged?: (roadId: string | null) => void;
+  onRoadEditSelectionChanged?: (selection: RoadEditSelection) => void;
 }
 
 interface DrawingManagerState {
@@ -233,6 +240,7 @@ export interface DrawingManager {
   }): void;
   getSelectedRoadId(): string | null;
   setSelectedRoadId(id: string | null): void;
+  getRoadEditSelection(): RoadEditSelection;
   getCustomRoads(): Road[];
   getCustomRoadsDirty(): boolean;
   clearCustomRoadsDirty(): void;
@@ -240,8 +248,15 @@ export interface DrawingManager {
 }
 
 export function createDrawingManager(options: DrawingManagerOptions): DrawingManager {
-  const { canvas, image, onShapesChanged, onPointerMove, onInteraction, onRoadSelectionChanged } =
-    options;
+  const {
+    canvas,
+    image,
+    onShapesChanged,
+    onPointerMove,
+    onInteraction,
+    onRoadSelectionChanged,
+    onRoadEditSelectionChanged
+  } = options;
   const context = canvas.getContext("2d");
   if (!context) {
     throw new Error("Canvas 2D context unavailable");
@@ -324,6 +339,33 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
   };
   let lastCanvasWidth = canvas.width;
   let lastCanvasHeight = canvas.height;
+  let lastRoadEditSelection: RoadEditSelection = {
+    roadId: null,
+    pointIndex: null,
+    hasDraft: false
+  };
+
+  const getRoadEditSelectionSnapshot = (): RoadEditSelection => ({
+    roadId: state.selectedRoadId,
+    pointIndex: state.roadEdit.selectedPointIndex,
+    hasDraft: !!state.roadEdit.draft
+  });
+
+  const notifyRoadEditSelection = (shouldNotify = true) => {
+    if (!onRoadEditSelectionChanged) {
+      lastRoadEditSelection = getRoadEditSelectionSnapshot();
+      return;
+    }
+    const next = getRoadEditSelectionSnapshot();
+    const changed =
+      next.roadId !== lastRoadEditSelection.roadId ||
+      next.pointIndex !== lastRoadEditSelection.pointIndex ||
+      next.hasDraft !== lastRoadEditSelection.hasDraft;
+    lastRoadEditSelection = next;
+    if (changed && shouldNotify) {
+      onRoadEditSelectionChanged(next);
+    }
+  };
 
   function notifyShapes() {
     onShapesChanged?.(state.shapes.slice());
@@ -695,6 +737,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     }
     state.roadEdit.selectedPointIndex = null;
     state.roadEdit.drag = null;
+    notifyRoadEditSelection(shouldNotify);
     if (shouldNotify) {
       notifyRoadSelection();
     }
@@ -1018,6 +1061,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       storeMode: state.geoMapper ? "geo" : "pixel"
     };
     state.roadEdit.selectedPointIndex = null;
+    notifyRoadEditSelection();
   }
 
   function appendRoadDraftPoint(point: RoadRenderPoint) {
@@ -1060,6 +1104,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       return;
     }
     state.roadEdit.draft = null;
+    notifyRoadEditSelection();
     redraw();
   }
 
@@ -1086,6 +1131,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
   function beginRoadDrag(roadId: string, pointIndex: number) {
     state.roadEdit.drag = { roadId, pointIndex };
     state.roadEdit.selectedPointIndex = pointIndex;
+    notifyRoadEditSelection();
   }
 
   function updateRoadDrag(point: RoadRenderPoint) {
@@ -1167,6 +1213,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     const nextIndex = Math.min(pointIndex, road.points.length - 1);
     state.roadEdit.selectedPointIndex = nextIndex;
     updateCustomRoadCache(roadId);
+    notifyRoadEditSelection();
     redraw();
   }
 
@@ -1246,6 +1293,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       state.roadToolMode = mode;
       if (mode === "off") {
         state.roadEdit = { draft: null, drag: null, selectedPointIndex: null };
+        notifyRoadEditSelection();
       } else {
         state.polygonDraft = null;
       }
@@ -1368,6 +1416,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       state.customRoads = data.customRoads.map((road) => cloneRoad(road));
       state.customRoadsDirty = false;
       state.roadEdit = { draft: null, drag: null, selectedPointIndex: null };
+      notifyRoadEditSelection();
       rebuildRoadCaches();
       syncRoadSelection();
       redraw();
@@ -1410,6 +1459,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
           : state.customRoads;
         state.customRoadsDirty = false;
         state.roadEdit = { draft: null, drag: null, selectedPointIndex: null };
+        notifyRoadEditSelection();
       }
       if (data.buildings) {
         state.buildings = data.buildings.map((building) => cloneBuilding(building));
@@ -1431,6 +1481,9 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     setSelectedRoadId(id: string | null) {
       setSelectedRoadId(id);
       redraw();
+    },
+    getRoadEditSelection() {
+      return getRoadEditSelectionSnapshot();
     },
     getCustomRoads() {
       return state.customRoads.map((road) => cloneRoad(road));

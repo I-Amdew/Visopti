@@ -18,6 +18,18 @@
       <div id="workspace">
         <div class="map-wrapper">
           <div id="mapView"></div>
+          <form id="addressForm" class="address-bar" role="search">
+            <input
+              id="addressInput"
+              type="search"
+              name="address"
+              placeholder="Search address or place"
+              aria-label="Search address"
+              autocomplete="street-address"
+              enterkeyhint="search"
+            />
+            <button id="addressGo" type="submit">Go</button>
+          </form>
           <div id="mapStatus" class="map-status">Frame unlocked: pan/zoom to set a new reference.</div>
         </div>
         <div class="canvas-wrapper">
@@ -25,17 +37,20 @@
           <div id="statusOverlay">Loading…</div>
         </div>
       </div>
+      
       <section id="controls">
         <h2>Map & Terrain</h2>
         <p class="hint">
           Pan/zoom the map to set your frame, lock it, then load topography to sync the canvas.
         </p>
-        <label>Basemap style
+        <label>Basemap
           <select id="basemapStyle">
             <option value="street">Street</option>
             <option value="satellite">Satellite</option>
+            <option value="autoStreet">Auto street</option>
           </select>
         </label>
+        <div id="basemapWarning" class="status-line hidden"></div>
         <div class="control-buttons">
           <button id="btnLockFrame" class="primary">Lock frame</button>
           <button id="btnLoadTopography">Load topography</button>
@@ -125,6 +140,107 @@
         <label class="import-label">Import shapes JSON
           <input id="importShapesFile" type="file" accept="application/json" />
         </label>
+
+        <details class="advanced-section">
+          <summary>Roads &amp; Traffic</summary>
+          <div class="details-body">
+            <h3>Mode</h3>
+            <div class="toggle-group">
+              <label class="toggle-option">
+                <input id="modeAuto" type="radio" name="roadMode" value="auto" checked />
+                Auto mode
+              </label>
+              <label class="toggle-option">
+                <input id="modeCustom" type="radio" name="roadMode" value="custom" />
+                Custom mode
+              </label>
+            </div>
+
+            <h3>Auto data</h3>
+            <div class="control-buttons">
+              <button id="btnAutoPopulate" class="primary">Auto-populate roads/buildings</button>
+              <button id="btnRefreshAuto">Refresh auto data</button>
+            </div>
+            <div id="autoDataStatus" class="status-line">No auto data yet.</div>
+
+            <h3>Epicenter</h3>
+            <div class="control-buttons">
+              <button id="btnPickEpicenter">Set epicenter by click</button>
+            </div>
+            <label>Radius (m)
+              <input id="epicenterRadius" type="range" min="50" max="5000" step="50" value="800" />
+            </label>
+            <div class="value-row">
+              <span id="epicenterRadiusValue">800 m</span>
+              <span id="epicenterStatus">No epicenter set</span>
+            </div>
+
+            <h3>Traffic</h3>
+            <label>Traffic preset
+              <select id="trafficPreset">
+                <option value="am">AM</option>
+                <option value="pm">PM</option>
+                <option value="neutral" selected>Neutral</option>
+                <option value="hourly">Hourly</option>
+              </select>
+            </label>
+            <label id="trafficHourRow" class="hidden">Hour
+              <input id="trafficHour" type="range" min="0" max="23" step="1" value="8" />
+            </label>
+            <div id="trafficHourValue" class="value-row hidden">08:00</div>
+            <label>Detail level
+              <input id="trafficDetail" type="range" min="1" max="5" step="1" value="3" />
+            </label>
+            <div id="trafficDetailValue" class="value-row">Detail 3</div>
+            <div class="control-buttons">
+              <button id="btnComputeTraffic" class="primary">Compute traffic</button>
+            </div>
+            <label class="checkbox-row">
+              <input id="toggleTrafficOverlay" type="checkbox" checked />
+              Show traffic overlay
+            </label>
+            <label class="checkbox-row">
+              <input id="toggleDirectionArrows" type="checkbox" />
+              Show direction arrows
+            </label>
+            <div id="trafficProgress" class="progress-row hidden">
+              <div id="trafficProgressLabel">Simulating…</div>
+              <progress id="trafficProgressBar" max="1" value="0"></progress>
+            </div>
+            <div id="trafficStatus" class="status-line hidden"></div>
+
+            <h3>Road tools</h3>
+            <div class="control-buttons">
+              <button id="btnAddRoad">Add custom road</button>
+              <button id="btnEditRoad">Edit selected road</button>
+              <button id="btnDeleteRoad">Delete selected road</button>
+            </div>
+            <div id="roadProperties" class="panel hidden">
+              <label>Name (optional)
+                <input id="roadName" type="text" placeholder="Road name" />
+              </label>
+              <label>One-way
+                <select id="roadDirection">
+                  <option value="both">Both</option>
+                  <option value="forward">Forward</option>
+                  <option value="backward">Backward</option>
+                </select>
+              </label>
+              <label class="checkbox-row">
+                <input id="roadShowCenterline" type="checkbox" />
+                Show direction line
+              </label>
+              <label>Cars/hour forward
+                <input id="roadCarsForward" type="number" min="0" step="50" />
+              </label>
+              <label>Cars/hour backward
+                <input id="roadCarsBackward" type="number" min="0" step="50" />
+              </label>
+              <p class="hint">Custom roads only.</p>
+            </div>
+          </div>
+        </details>
+
         <div id="warningBanner" class="hidden"></div>
         <div id="statusMessage"></div>
       </section>

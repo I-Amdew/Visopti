@@ -31,6 +31,54 @@ body {
   gap: 1rem;
   padding: 1rem;
   height: 100vh;
+  align-items: stretch;
+}
+
+.address-bar {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  right: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem;
+  border-radius: 10px;
+  border: 1px solid #343a44;
+  background: rgba(17, 22, 28, 0.9);
+  z-index: 2;
+}
+
+.address-bar input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid #555d68;
+  background: #161b22;
+  color: #f2f2f2;
+  font-size: 1rem;
+}
+
+.address-bar button {
+  padding: 0.55rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid #4c5561;
+  background: #1c222b;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1rem;
+  white-space: nowrap;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.1s ease;
+}
+
+.address-bar button:hover {
+  background: #222a35;
+  border-color: #5f6977;
+}
+
+.address-bar button:active {
+  transform: translateY(1px);
 }
 
 #workspace {
@@ -38,6 +86,7 @@ body {
   flex-direction: column;
   flex: 1;
   gap: 1rem;
+  min-height: 0;
   min-width: 0;
 }
 
@@ -67,6 +116,7 @@ body {
   border-radius: 6px;
   pointer-events: none;
   max-width: calc(100% - 1.5rem);
+  z-index: 1;
 }
 
 .canvas-wrapper {
@@ -126,6 +176,27 @@ body {
   font-size: 0.9rem;
 }
 
+#controls label.toggle-option {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.toggle-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.toggle-option {
+  background: #1c222b;
+  border: 1px solid #4c5561;
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+}
+
 .checkbox-row {
   display: flex;
   flex-direction: row;
@@ -139,6 +210,19 @@ body {
   border: 1px solid #555d68;
   background: #161b22;
   color: #f2f2f2;
+  font-size: 1rem;
+}
+
+#controls input[type="text"],
+#controls input[type="search"] {
+  padding: 0.4rem;
+  border-radius: 6px;
+  border: 1px solid #555d68;
+  background: #161b22;
+  color: #f2f2f2;
+  font-size: 1rem;
+  width: 100%;
+  min-width: 0;
 }
 
 #controls select {
@@ -147,10 +231,44 @@ body {
   border: 1px solid #555d68;
   background: #161b22;
   color: #f2f2f2;
+  font-size: 1rem;
 }
 
 #controls input[type="range"] {
   width: 100%;
+}
+
+.advanced-section {
+  border: 1px solid #3c414a;
+  border-radius: 10px;
+  padding: 0.5rem 0.75rem;
+  background: #232831;
+}
+
+.advanced-section summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #f2f2f2;
+}
+
+.advanced-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-section summary::marker {
+  content: "";
+}
+
+.advanced-section[open] summary {
+  margin-bottom: 0.5rem;
+}
+
+.advanced-section .details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 #progressContainer {
@@ -171,6 +289,26 @@ body {
   border-radius: 4px;
 }
 
+.progress-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.progress-row progress {
+  width: 100%;
+  height: 6px;
+  border-radius: 4px;
+}
+
 .button-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -179,6 +317,7 @@ body {
 
 .button-grid button,
 .control-buttons button,
+#trafficProgress button,
 #btnExportProject {
   padding: 0.35rem;
   border-radius: 6px;
@@ -192,6 +331,7 @@ body {
 
 .button-grid button:hover,
 .control-buttons button:hover,
+#trafficProgress button:hover,
 #btnExportProject:hover {
   background: #222a35;
   border-color: #5f6977;
@@ -199,6 +339,7 @@ body {
 
 .button-grid button:active,
 .control-buttons button:active,
+#trafficProgress button:active,
 #btnExportProject:active {
   transform: translateY(1px);
 }
@@ -241,6 +382,33 @@ button.primary:hover {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+}
+
+.status-line {
+  font-size: 0.85rem;
+  color: #cfd6e3;
+  background: #1b2028;
+  border: 1px solid #343a44;
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+}
+
+.value-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #cfd6e3;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  background: #232831;
+  border-radius: 8px;
+  border: 1px solid #3c414a;
 }
 
 #warningBanner {
