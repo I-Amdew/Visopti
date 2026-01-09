@@ -11,6 +11,7 @@ import {
   TrafficByHour,
   TrafficByPreset,
   TrafficByRoadId,
+  TrafficConfig,
   TrafficDirectionalScores,
   TrafficViewState
 } from "./types";
@@ -45,16 +46,6 @@ type RoadMode = "auto" | "custom";
 type RoadDirection = "both" | "forward" | "backward";
 type TrafficPreset = "am" | "pm" | "neutral" | "hourly";
 type TrafficPresetKey = "am" | "pm" | "neutral";
-type LegacyTrafficByRoadId = Record<string, { forward: number; backward: number }>;
-
-interface TrafficConfig {
-  preset: TrafficPreset;
-  hour: number;
-  detail: number;
-  showOverlay: boolean;
-  showDirectionArrows: boolean;
-  seed: number;
-}
 
 interface AutoDataState {
   bounds: GeoBounds | null;

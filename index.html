@@ -203,10 +203,13 @@
               <input id="toggleDirectionArrows" type="checkbox" />
               Show direction arrows
             </label>
-            <div id="trafficProgress" class="progress-row hidden">
-              <div id="trafficProgressLabel">Simulating…</div>
-              <progress id="trafficProgressBar" max="1" value="0"></progress>
-            </div>
+        <div id="trafficProgress" class="progress-row hidden">
+          <div class="progress-header">
+            <div id="trafficProgressLabel">Simulating…</div>
+            <button id="btnCancelTraffic" type="button">Cancel</button>
+          </div>
+          <progress id="trafficProgressBar" max="1" value="0"></progress>
+        </div>
             <div id="trafficStatus" class="status-line hidden"></div>
 
             <h3>Road tools</h3>
