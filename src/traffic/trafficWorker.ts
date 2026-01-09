@@ -1,14 +1,9 @@
 import { simulateTraffic } from "./sim";
 import { TrafficSimProgress, TrafficSimRequest } from "./types";
 
-type TrafficWorkerRequest =
-  | TrafficSimRequest
-  | {
-      type: "run";
-      payload: TrafficSimRequest;
-    };
-
-type TrafficWorkerControl = { type: "cancel" };
+type TrafficWorkerRun = { type: "run"; payload: TrafficSimRequest; runId: number };
+type TrafficWorkerRequest = TrafficSimRequest | TrafficWorkerRun;
+type TrafficWorkerControl = { type: "cancel"; runId?: number };
 
 const ctx = self as unknown as {
   postMessage: (message: unknown) => void;
@@ -16,15 +11,20 @@ const ctx = self as unknown as {
 };
 
 let cancelled = false;
+let activeRunId = 0;
 
 ctx.onmessage = (event: MessageEvent<TrafficWorkerRequest | TrafficWorkerControl>) => {
   const data = event.data;
   if (data && "type" in data && data.type === "cancel") {
-    cancelled = true;
+    if (data.runId === undefined || data.runId === activeRunId) {
+      cancelled = true;
+    }
     return;
   }
 
-  const request = data && "type" in data && data.type === "run" ? data.payload : (data as TrafficSimRequest);
+  const runRequest = data && "type" in data && data.type === "run" ? data : null;
+  const request = runRequest ? runRequest.payload : (data as TrafficSimRequest);
+  activeRunId = runRequest?.runId ?? 0;
   cancelled = false;
 
   try {
@@ -33,18 +33,24 @@ ctx.onmessage = (event: MessageEvent<TrafficWorkerRequest | TrafficWorkerControl
         if (cancelled) {
           return;
         }
-        ctx.postMessage({ type: "progress", ...progress });
+        ctx.postMessage({ type: "progress", runId: activeRunId, ...progress });
       },
       isCancelled: () => cancelled,
     });
 
     if (!cancelled) {
-      ctx.postMessage({ type: "result", trafficByRoadId: result.roadTraffic, meta: result.meta });
+      ctx.postMessage({
+        type: "result",
+        runId: activeRunId,
+        trafficByRoadId: result.roadTraffic,
+        meta: result.meta,
+      });
     }
   } catch (error) {
     if (!cancelled) {
       ctx.postMessage({
         type: "error",
+        runId: activeRunId,
         message: error instanceof Error ? error.message : "Traffic simulation failed.",
       });
     }

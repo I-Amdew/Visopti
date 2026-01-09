@@ -13,7 +13,9 @@ import {
   RoadSource,
   RoadTraffic,
   Shape,
+  TrafficByRoadId,
   TrafficConfig,
+  TrafficDirectionalScores,
   TrafficViewState
 } from "./types";
 import type { TileSourceId } from "./mapTiles";
@@ -48,8 +50,6 @@ const ROAD_CLASS_SET = new Set<RoadClass>([
   "other"
 ]);
 
-type LegacyTrafficByRoadId = Record<string, { forward: number; backward: number }>;
-
 export interface RuntimeProjectState {
   bounds: GeoBounds | null;
   basemapMode?: string;
@@ -68,7 +68,7 @@ export interface RuntimeProjectState {
   autoBuildings?: Building[];
   customRoads?: Road[];
   epicenter?: { lat: number; lon: number; radiusM: number } | null;
-  traffic?: { config?: TrafficConfig; data?: LegacyTrafficByRoadId | null };
+  traffic?: { config?: TrafficConfig; data?: TrafficByRoadId | null };
   trafficConfig?: TrafficConfig;
   trafficView?: TrafficViewState;
 }
@@ -304,35 +304,49 @@ function buildTrafficByRoadId(
   roads: Road[],
   view: TrafficViewState,
   warnings: string[]
-): LegacyTrafficByRoadId | null {
+): TrafficByRoadId | null {
   if (!roads.length) {
     return null;
   }
-  const hour = clampHour(view.hour);
-  const byRoad: LegacyTrafficByRoadId = {};
+  const baseHour = clampHour(view.hour);
+  const byRoad: TrafficByRoadId = {};
   for (const road of roads) {
-    const traffic = road.traffic;
+    const traffic = road.traffic ? normalizeRoadTraffic(road.traffic, baseHour) : undefined;
     if (!traffic) {
       continue;
     }
-    let forward: number | undefined;
-    let backward: number | undefined;
+    const byHour: Record<number, TrafficDirectionalScores> = {};
     const hourly = traffic.hourlyDirectionalScores ?? [];
-    if (hourly.length > 0) {
-      const matched =
-        hourly.find((entry) => Math.floor(entry.hour) === hour) ?? hourly[0];
-      if (matched) {
-        forward = Number.isFinite(matched.forward) ? matched.forward : undefined;
-        backward = Number.isFinite(matched.backward) ? matched.backward : undefined;
+    hourly.forEach((entry) => {
+      const hour = parseHour(entry.hour);
+      if (hour === null) {
+        return;
       }
-    } else {
-      forward = Number.isFinite(traffic.forward) ? (traffic.forward as number) : undefined;
-      backward = Number.isFinite(traffic.backward) ? (traffic.backward as number) : undefined;
+      const forward = parseFiniteNumber(entry.forward);
+      const backward = parseFiniteNumber(entry.backward);
+      if (forward === null && backward === null) {
+        return;
+      }
+      const scores: TrafficDirectionalScores = {};
+      if (forward !== null) {
+        scores.forward = forward;
+      }
+      if (backward !== null) {
+        scores.reverse = backward;
+      }
+      if (forward !== null && backward !== null) {
+        scores.total = forward + backward;
+      }
+      byHour[hour] = scores;
+    });
+    if (!Object.keys(byHour).length) {
+      continue;
     }
-
-    if (forward !== undefined || backward !== undefined) {
-      byRoad[road.id] = { forward: forward ?? 0, backward: backward ?? 0 };
-    }
+    byRoad[road.id] = {
+      am: { ...byHour },
+      pm: { ...byHour },
+      neutral: { ...byHour }
+    };
   }
   if (!Object.keys(byRoad).length && roads.some((road) => road.traffic)) {
     warnings.push("Traffic results were present but could not be normalized.");

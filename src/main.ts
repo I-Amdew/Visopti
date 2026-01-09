@@ -4,7 +4,6 @@ import {
   Building,
   GeoBounds,
   MapPoint,
-  ProjectState,
   Road,
   RoadHourlyDirectionalScore,
   RoadTraffic,
@@ -12,7 +11,6 @@ import {
   TrafficByHour,
   TrafficByPreset,
   TrafficByRoadId,
-  TrafficConfig,
   TrafficDirectionalScores,
   TrafficViewState
 } from "./types";
@@ -1939,8 +1937,6 @@ function createDefaultTrafficView(config?: TrafficConfig): TrafficViewState {
   };
 }
 
-const TRAFFIC_PRESET_KEYS: TrafficPresetKey[] = ["am", "pm", "neutral"];
-const TRAFFIC_PRESETS: TrafficPreset[] = ["am", "pm", "neutral", "hourly"];
 const PRESET_DEFAULT_HOURS: Record<TrafficPresetKey, number> = {
   am: 8,
   pm: 17,
@@ -2001,21 +1997,12 @@ function buildTrafficByPreset(byHour: TrafficByHour): TrafficByPreset {
   };
 }
 
-function expandTrafficPresets(
-  data: TrafficByRoadId | LegacyTrafficByRoadId | null
-): TrafficByRoadId | null {
+function expandTrafficPresets(data: TrafficByRoadId | null): TrafficByRoadId | null {
   if (!data) {
     return null;
   }
   const expanded: TrafficByRoadId = {};
   Object.entries(data).forEach(([roadId, byPreset]) => {
-    if (isLegacyTrafficEntry(byPreset)) {
-      const byHour = buildTrafficByHourFromScores(byPreset.forward, byPreset.backward);
-      if (Object.keys(byHour).length > 0) {
-        expanded[roadId] = buildTrafficByPreset(byHour);
-      }
-      return;
-    }
     const presetKeys = Object.keys(byPreset);
     if (!presetKeys.length) {
       return;
@@ -2030,19 +2017,6 @@ function expandTrafficPresets(
     };
   });
   return expanded;
-}
-
-function isLegacyTrafficEntry(value: unknown): value is LegacyTrafficByRoadId[string] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  const forward = record.forward;
-  const backward = record.backward;
-  return (
-    (typeof forward === "number" && Number.isFinite(forward)) ||
-    (typeof backward === "number" && Number.isFinite(backward))
-  );
 }
 
 function buildTrafficByHourFromScores(
@@ -2180,43 +2154,6 @@ function applyTrafficResultsToRoads(
     };
     road.traffic = nextTraffic;
   }
-}
-
-function buildLegacyTrafficByRoadId(
-  data: TrafficByRoadId | null,
-  view: TrafficViewState
-): LegacyTrafficByRoadId | null {
-  if (!data) {
-    return null;
-  }
-  const preset = normalizeTrafficPreset(view.preset);
-  const hour = clampInt(view.hour, 0, 23);
-  const legacy: LegacyTrafficByRoadId = {};
-  Object.entries(data).forEach(([roadId, byPreset]) => {
-    const presetData =
-      byPreset[preset] ??
-      byPreset.neutral ??
-      byPreset.am ??
-      byPreset.pm ??
-      byPreset.hourly;
-    if (!presetData) {
-      return;
-    }
-    const scores = presetData[hour] ?? presetData[0];
-    if (!scores) {
-      return;
-    }
-    const forward = Number.isFinite(scores.forward) ? (scores.forward as number) : undefined;
-    const backward = Number.isFinite(scores.reverse) ? (scores.reverse as number) : undefined;
-    if (forward === undefined && backward === undefined) {
-      return;
-    }
-    legacy[roadId] = {
-      forward: forward ?? 0,
-      backward: backward ?? 0
-    };
-  });
-  return Object.keys(legacy).length > 0 ? legacy : null;
 }
 
 function formatTrafficMeta(meta?: TrafficSimResult["meta"] | null): string {
