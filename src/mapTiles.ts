@@ -1,8 +1,9 @@
 import { GeoBounds } from "./types";
 
 const TILE_SIZE = 256;
+const AUTO_STREET_FILTER = "grayscale(1) contrast(0.85) brightness(1.1)";
 
-export type TileSourceId = "street" | "satellite";
+export type TileSourceId = "street" | "satellite" | "autoStreet";
 
 export interface TileSource {
   id: TileSourceId;
@@ -12,24 +13,35 @@ export interface TileSource {
   maxZoom: number;
 }
 
+const STREET_SOURCE: TileSource = {
+  id: "street",
+  label: "Street",
+  url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  maxZoom: 19,
+  attribution:
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+};
+
+const AUTO_STREET_SOURCE: TileSource = {
+  ...STREET_SOURCE,
+  id: "autoStreet",
+  label: "Auto Street",
+};
+
+const SATELLITE_SOURCE: TileSource = {
+  id: "satellite",
+  label: "Satellite",
+  url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  maxZoom: 19,
+  attribution:
+    "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, " +
+    "Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+};
+
 export const TILE_SOURCES: TileSource[] = [
-  {
-    id: "street",
-    label: "Street",
-    url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    maxZoom: 19,
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  },
-  {
-    id: "satellite",
-    label: "Satellite",
-    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    maxZoom: 19,
-    attribution:
-      "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, " +
-      "Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
-  },
+  STREET_SOURCE,
+  AUTO_STREET_SOURCE,
+  SATELLITE_SOURCE,
 ];
 
 export function getTileSource(id: TileSourceId): TileSource {
@@ -43,9 +55,14 @@ export interface MapFrame {
   height: number;
 }
 
+export interface RenderMapFrameOptions {
+  basemapMode?: TileSourceId;
+}
+
 export async function renderMapFrameImage(
   frame: MapFrame,
-  tileSource: TileSource
+  tileSource: TileSource,
+  opts?: RenderMapFrameOptions
 ): Promise<HTMLCanvasElement> {
   const { bounds, zoom, width, height } = frame;
   const canvas = document.createElement("canvas");
@@ -81,17 +98,29 @@ export async function renderMapFrameImage(
   }
 
   const tiles = await Promise.all(tilePromises);
-  for (const tile of tiles) {
-    if (!tile) {
-      continue;
+  const basemapMode = opts?.basemapMode ?? tileSource.id;
+  const useAutoStreetFilter = basemapMode === "autoStreet";
+  if (useAutoStreetFilter) {
+    ctx.save();
+    ctx.filter = AUTO_STREET_FILTER;
+  }
+  try {
+    for (const tile of tiles) {
+      if (!tile) {
+        continue;
+      }
+      const tileOriginX = tile.x * TILE_SIZE;
+      const tileOriginY = tile.y * TILE_SIZE;
+      const drawX = (tileOriginX - minPixel.x) * scaleX;
+      const drawY = (tileOriginY - minPixel.y) * scaleY;
+      const drawWidth = TILE_SIZE * scaleX;
+      const drawHeight = TILE_SIZE * scaleY;
+      ctx.drawImage(tile.image, drawX, drawY, drawWidth, drawHeight);
     }
-    const tileOriginX = tile.x * TILE_SIZE;
-    const tileOriginY = tile.y * TILE_SIZE;
-    const drawX = (tileOriginX - minPixel.x) * scaleX;
-    const drawY = (tileOriginY - minPixel.y) * scaleY;
-    const drawWidth = TILE_SIZE * scaleX;
-    const drawHeight = TILE_SIZE * scaleY;
-    ctx.drawImage(tile.image, drawX, drawY, drawWidth, drawHeight);
+  } finally {
+    if (useAutoStreetFilter) {
+      ctx.restore();
+    }
   }
 
   return canvas;
