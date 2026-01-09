@@ -49,7 +49,7 @@ export class GeoMapper {
   }
 
   /**
-   * Maps image pixels → latitude/longitude using the formulas from image_georeference.json:
+   * Maps image pixels → latitude/longitude using the current map frame bounds.
    *   lat = lat_max_north - ((y + 0.5) / height_px) * (lat_max_north - lat_min_south)
    *   lon = lon_min_west  + ((x + 0.5) / width_px ) * (lon_max_east  - lon_min_west)
    */

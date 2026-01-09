@@ -1,9 +1,10 @@
-# Food Truck Visibility
+# Visopti
 
-Food Truck Visibility is a visual planning tool for figuring out where a food truck can go and who can see it. Use the map to pick any location, lock the frame, load topography from a live API, and then sketch viewer, candidate, and obstacle zones directly on the canvas.
+Visopti is a lightweight web app for evaluating line-of-sight coverage in real-world terrain. Use the map to pick any location, lock the frame, pull live topography, and sketch viewer, candidate, and obstacle zones directly on the canvas.
 
 ## Why it’s useful
 - **Anywhere on the map.** Pan and zoom to any place, lock the view, and the canvas updates to that exact frame.
+- **Street or satellite basemaps.** Toggle between street and satellite tiles for the context you need.
 - **Terrain-aware.** Elevation data is pulled on demand so visibility reflects real topography.
 - **Designed for quick decisions.** Draw zones, compute heatmaps, and export projects without leaving the browser.
 
@@ -21,7 +22,21 @@ Food Truck Visibility is a visual planning tool for figuring out where a food tr
 For hands-on steps, see **[USAGE.md](./USAGE.md)**.
 
 ## How map + topography work
-When you lock the map frame, the app captures the current map bounds, fetches elevation data from the Open-Meteo Elevation API, and renders OpenStreetMap tiles into the canvas. That means the frame of reference is always the exact area you’re zoomed into.
+When you lock the map frame, the app captures the current map bounds, fetches elevation data from the Open-Meteo Elevation API, and renders map tiles into the canvas. That means the frame of reference is always the exact area you’re zoomed into.
+
+The elevation requests are batched and the sampling density is adjustable (in feet), so you can trade detail for faster visibility processing when you’re exploring large areas.
+
+## Typical use cases
+- Choosing a high-visibility placement for pop-ups, kiosks, or signage.
+- Comparing coverage between multiple candidate sites within a single map frame.
+- Exploring blindspots caused by terrain and obstacles before you deploy.
 
 ## License
 This project is released under the MIT License, so you can use it however you want. See [LICENSE](./LICENSE).
+
+## Planned updates
+- Automatic street and lane detection with per-lane visibility tuning.
+- Time-of-day traffic flow modeling (AM/PM direction shifts, intensity controls).
+- Street classification and flow presets (neighborhood, arterial, downtown, dead-end).
+- Area-centric flow modeling (define a central destination and invert for evening flow).
+- Road-following visibility cones with configurable angular width.

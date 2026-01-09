@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Food Truck Visibility</title>
+    <title>Visopti</title>
     <link rel="icon" href="data:,">
     <link
       rel="stylesheet"
@@ -30,8 +30,14 @@
         <p class="hint">
           Pan/zoom the map to set your frame, lock it, then load topography to sync the canvas.
         </p>
+        <label>Basemap style
+          <select id="basemapStyle">
+            <option value="street">Street</option>
+            <option value="satellite">Satellite</option>
+          </select>
+        </label>
         <div class="control-buttons">
-          <button id="btnLockFrame">Lock frame</button>
+          <button id="btnLockFrame" class="primary">Lock frame</button>
           <button id="btnLoadTopography">Load topography</button>
         </div>
 
@@ -46,17 +52,14 @@
         </div>
 
         <h2>Settings</h2>
-        <label>Truck height (ft)
-          <input id="truckHeight" type="number" value="6" min="1" />
-        </label>
-        <label>Truck length (ft)
-          <input id="truckLength" type="number" value="20" min="1" />
-        </label>
-        <label>Truck width (ft)
-          <input id="truckWidth" type="number" value="8" min="1" />
+        <label>Target height (ft)
+          <input id="siteHeight" type="number" value="6" min="1" />
         </label>
         <label>Viewer height (ft)
           <input id="viewerHeight" type="number" value="6" min="1" />
+        </label>
+        <label>Topography sample spacing (ft)
+          <input id="topoSpacing" type="number" value="25" min="5" step="1" />
         </label>
         <label>Sample step (px)
           <input id="sampleStep" type="number" value="5" min="1" />
@@ -101,7 +104,7 @@
         </label>
 
         <div class="control-buttons">
-          <button id="btnComputeHeatmap">Compute heatmap</button>
+          <button id="btnComputeHeatmap" class="primary">Compute heatmap</button>
           <button id="btnComputeShading">Compute blindspots</button>
           <button id="btnClearHeatmap">Clear heatmap</button>
           <button id="btnClearShading">Clear blindspots</button>

@@ -1,14 +1,10 @@
 {
-  "name": "food-truck-visibility",
+  "name": "visopti",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "sync-assets": "node scripts/sync-assets.mjs",
-    "predev": "npm run sync-assets",
     "dev": "vite",
-    "prebuild": "npm run sync-assets",
     "build": "tsc && vite build",
-    "prepreview": "npm run sync-assets",
     "preview": "vite preview"
   },
   "devDependencies": {

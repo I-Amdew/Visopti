@@ -43,8 +43,8 @@ body {
 
 .map-wrapper {
   position: relative;
-  flex: 0 0 38%;
-  min-height: 220px;
+  flex: 0 0 45%;
+  min-height: 260px;
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid #343a44;
@@ -141,6 +141,14 @@ body {
   color: #f2f2f2;
 }
 
+#controls select {
+  padding: 0.4rem;
+  border-radius: 6px;
+  border: 1px solid #555d68;
+  background: #161b22;
+  color: #f2f2f2;
+}
+
 #controls input[type="range"] {
   width: 100%;
 }
@@ -179,11 +187,35 @@ body {
   color: inherit;
   cursor: pointer;
   font-size: 0.9rem;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.1s ease;
+}
+
+.button-grid button:hover,
+.control-buttons button:hover,
+#btnExportProject:hover {
+  background: #222a35;
+  border-color: #5f6977;
+}
+
+.button-grid button:active,
+.control-buttons button:active,
+#btnExportProject:active {
+  transform: translateY(1px);
 }
 
 .button-grid button.active {
   background: #2e8bff;
   border-color: #5ea3ff;
+}
+
+button.primary {
+  background: #2e8bff;
+  border-color: #5ea3ff;
+}
+
+button.primary:hover {
+  background: #3c97ff;
+  border-color: #7fb6ff;
 }
 
 .control-buttons {

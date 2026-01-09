@@ -53,10 +53,9 @@ export interface GeoBounds {
 }
 
 export interface AppSettings {
-  truckHeightFt: number;
-  truckLengthFt: number;
-  truckWidthFt: number;
+  siteHeightFt: number;
   viewerHeightFt: number;
+  topoSpacingFt: number;
   sampleStepPx: number;
   overlays: OverlaySettings;
   opacity: OpacitySettings;
