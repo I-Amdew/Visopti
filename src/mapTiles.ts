@@ -11,6 +11,7 @@ export interface TileSource {
   url: string;
   attribution: string;
   maxZoom: number;
+  renderFilter?: string;
 }
 
 const STREET_SOURCE: TileSource = {
@@ -26,6 +27,7 @@ const AUTO_STREET_SOURCE: TileSource = {
   ...STREET_SOURCE,
   id: "autoStreet",
   label: "Auto Street",
+  renderFilter: AUTO_STREET_FILTER,
 };
 
 const SATELLITE_SOURCE: TileSource = {
@@ -57,6 +59,16 @@ export interface MapFrame {
 
 export interface RenderMapFrameOptions {
   basemapMode?: TileSourceId;
+}
+
+function resolveBasemapFilter(
+  tileSource: TileSource,
+  basemapMode?: TileSourceId
+): string | null {
+  if (basemapMode) {
+    return basemapMode === "autoStreet" ? AUTO_STREET_FILTER : null;
+  }
+  return tileSource.renderFilter ?? null;
 }
 
 export async function renderMapFrameImage(
@@ -98,11 +110,10 @@ export async function renderMapFrameImage(
   }
 
   const tiles = await Promise.all(tilePromises);
-  const basemapMode = opts?.basemapMode ?? tileSource.id;
-  const useAutoStreetFilter = basemapMode === "autoStreet";
-  if (useAutoStreetFilter) {
+  const basemapFilter = resolveBasemapFilter(tileSource, opts?.basemapMode);
+  if (basemapFilter) {
     ctx.save();
-    ctx.filter = AUTO_STREET_FILTER;
+    ctx.filter = basemapFilter;
   }
   try {
     for (const tile of tiles) {
@@ -118,7 +129,7 @@ export async function renderMapFrameImage(
       ctx.drawImage(tile.image, drawX, drawY, drawWidth, drawHeight);
     }
   } finally {
-    if (useAutoStreetFilter) {
+    if (basemapFilter) {
       ctx.restore();
     }
   }
