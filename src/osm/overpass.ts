@@ -9,21 +9,21 @@ const SHOW_DIRECTION_DEFAULT = true; // Default for new OSM roads.
 
 type OverpassTags = Record<string, string>;
 
-interface OverpassNode {
+export interface OverpassNode {
   type: "node";
   id: number;
   lat: number;
   lon: number;
 }
 
-interface OverpassWay {
+export interface OverpassWay {
   type: "way";
   id: number;
   nodes: number[];
   tags?: OverpassTags;
 }
 
-interface OverpassResponse {
+export interface OverpassResponse {
   elements: Array<OverpassNode | OverpassWay | { type: string; id: number }>;
   remark?: string;
 }
@@ -126,7 +126,7 @@ function buildOverpassQuery(bounds: GeoBounds): string {
 out body;`;
 }
 
-function parseOverpassPayload(payload: OverpassResponse): {
+export function parseOverpassPayload(payload: OverpassResponse): {
   roads: Road[];
   buildings: Building[];
   nodeCount: number;

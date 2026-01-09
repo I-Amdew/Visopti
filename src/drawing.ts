@@ -42,6 +42,27 @@ const ROAD_ARROW_SPACING = 70;
 const ROAD_CURVE_SAMPLES = 12;
 const ROAD_DIRECTION_SAMPLES = 10;
 
+export function shouldIgnoreGlobalKeyEvents(activeEl: Element | null): boolean {
+  if (!activeEl) {
+    return false;
+  }
+  const tagName = activeEl.tagName?.toUpperCase() ?? "";
+  if (tagName === "INPUT" || tagName === "TEXTAREA") {
+    return true;
+  }
+  const editable = (activeEl as HTMLElement).isContentEditable;
+  if (editable) {
+    return true;
+  }
+  if (typeof activeEl.getAttribute === "function") {
+    const attr = activeEl.getAttribute("contenteditable");
+    if (attr && attr.toLowerCase() !== "false") {
+      return true;
+    }
+  }
+  return false;
+}
+
 export type ToolMode =
   | "select"
   | "erase"
@@ -493,6 +514,9 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
   }
 
   function handleKeyDown(ev: KeyboardEvent) {
+    if (shouldIgnoreGlobalKeyEvents(document.activeElement)) {
+      return;
+    }
     if (state.roadToolMode === "edit") {
       if (ev.key === "Escape" && state.roadEdit.draft) {
         cancelRoadDraft();
