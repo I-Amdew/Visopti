@@ -1,38 +1,43 @@
 # Usage Guide
 
-## 1) Run the app
+## Run the app
 ```bash
 npm install
 npm run dev
 ```
 Open the local URL shown in the terminal (usually http://localhost:5173).
 
-## 2) Pick a map frame
-1. Pan and zoom the map to the area you want to analyze.
-2. Click **Lock frame** to freeze that view.
-3. Click **Load topography** (or lock the frame to auto-load).
+## Baseline workflow (address-first)
+### 1) Find the address or area on the map
+Pan and zoom to the location you want to analyze. Use **Basemap** to switch Street/Satellite/Auto street.
 
-The canvas will refresh to match the locked map frame.
+### 2) Lock the frame and load topography
+In **Map & Terrain**, click **Lock frame** to freeze the view, then click **Load topography** to sync elevation with the canvas.
 
-Use **Basemap style** to switch between street and satellite tiles.
+### 3) Draw zones
+In **Tools**, choose **Viewer Poly**, **Candidate Poly**, and **Obstacle Poly/Ellipse** as needed. Use **Select** and **Erase** to adjust shapes.
 
-## 3) Draw zones
-Use the **Tools** panel to draw:
-- **Viewer zones**: areas where people stand or walk.
-- **Candidate zones**: possible site placements.
-- **Obstacle zones**: trees, buildings, or anything that blocks sightlines.
+### 4) Compute visibility
+Click **Compute heatmap** and/or **Compute blindspots**.
 
-## 4) Compute visibility
-- **Compute heatmap**: shows the best placement coverage across the candidate zone.
-- **Compute blindspots**: highlights areas not visible from viewer zones.
+### 5) Adjust settings (optional)
+In **Settings**, adjust **Target height (ft)**, **Viewer height (ft)**, **Topography sample spacing (ft)**, and **Sample step (px)**. Overlay toggles and opacity sliders live here too.
 
-Adjust topography sample spacing, sample step size, and opacity sliders to control detail, speed, and display.
+### 6) Export/import project
+Use **Export project JSON** and **Import project JSON** to save or share work.
 
-## 5) Save or share work
-Export or import a project via the **Project** section. You can also export shapes only if you want to reuse zones elsewhere.
+## Advanced controls: roads, traffic, buildings (optional)
+### 1) Choose a mode
+In **Mode**, select **Auto mode** for OSM roads/buildings or **Custom mode** to draw your own roads.
 
-Your latest project settings and shapes are also autosaved locally in the browser.
+### 2) Auto data (Auto mode)
+In **Auto data**, click **Auto-populate roads & buildings** for the locked frame. Use **Refresh auto data** to update.
 
-## Tips
-- If elevation or map tiles fail to load, try again or check your network access.
-- Lock the frame before drawing for the most accurate results.
+### 3) Set epicenter and radius
+In **Epicenter**, click **Set epicenter by click**, then adjust **Radius (m)**.
+
+### 4) Compute traffic
+In **Traffic**, choose **Preset** (AM rush, PM rush, Neutral, Hourly). If you pick **Hourly**, set **Hour**. Set **Detail level**, then click **Compute traffic**. Toggle **Show traffic overlay** or **Show direction arrows** when needed.
+
+### 5) Add/edit custom roads and overrides (Custom mode)
+In **Road tools**, use **Add custom road**, **Edit selected road**, and **Delete selected road**. In the properties panel set **One-way**, **Show direction line**, **Cars/hour forward**, and **Cars/hour backward** (custom roads only). Load topography before computing traffic in Custom mode.
