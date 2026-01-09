@@ -9,11 +9,19 @@ import {
   sampleViewerPoints
 } from "./visibility";
 import { generateContourSegments } from "./contours";
-import { renderMapFrameImage } from "./mapTiles";
+import { getTileSource, TileSourceId, renderMapFrameImage } from "./mapTiles";
 import { createMapView } from "./mapView";
 import { fetchElevationGrid } from "./topography";
 
 type MapViewInstance = ReturnType<typeof createMapView>;
+type AutosavePayload = {
+  bounds: GeoBounds | null;
+  basemapId: TileSourceId;
+  settings: AppSettings;
+  shapes: Shape[];
+};
+
+const AUTOSAVE_KEY = "visopti-autosave-v1";
 
 async function init() {
   const canvas = document.getElementById("mainCanvas") as HTMLCanvasElement | null;
@@ -24,10 +32,11 @@ async function init() {
   const mapStatus = document.getElementById("mapStatus");
   const btnLockFrame = document.getElementById("btnLockFrame") as HTMLButtonElement | null;
   const btnLoadTopography = document.getElementById("btnLoadTopography") as HTMLButtonElement | null;
+  const basemapStyle = document.getElementById("basemapStyle") as HTMLSelectElement | null;
   if (!canvas || !statusOverlay || !statusMessage) {
     throw new Error("Missing core DOM elements");
   }
-  if (!mapContainer || !mapStatus || !btnLockFrame || !btnLoadTopography) {
+  if (!mapContainer || !mapStatus || !btnLockFrame || !btnLoadTopography || !basemapStyle) {
     throw new Error("Map controls missing from DOM");
   }
 
@@ -35,9 +44,15 @@ async function init() {
   const statusMessageEl = statusMessage;
   const warningBannerEl = warningBanner;
   const mapStatusEl = mapStatus;
+  const basemapStyleEl = basemapStyle;
 
   statusOverlayEl.textContent = "Zoom the map to pick your frame.";
   const mapView = createMapView(mapContainer);
+  basemapStyleEl.value = mapView.getTileSourceId();
+  basemapStyleEl.addEventListener("change", () => {
+    mapView.setTileSourceId(basemapStyleEl.value as TileSourceId);
+    scheduleAutosave();
+  });
 
   const placeholderImage = createPlaceholderCanvas(1200, 800);
 
@@ -47,6 +62,8 @@ async function init() {
   let mapper: GeoMapper | null = null;
   let currentBounds: GeoBounds | null = null;
   let frameLocked = false;
+  let autosave: AutosavePayload | null = loadAutosave();
+  let autosaveTimer: number | null = null;
   const drawingManager = createDrawingManager({
     canvas,
     image: placeholderImage,
@@ -81,13 +98,25 @@ async function init() {
 
   function shapeChangeHandler(shapes: Shape[]) {
     statusMessageEl.textContent = `Shapes: ${shapes.length}`;
+    scheduleAutosave();
     pendingInterrupt();
   }
 
   setupTools(drawingManager, () => updateStatusOverlay(null));
   setupSettings(settings, drawingManager, {
-    interruptComputations: () => pendingInterrupt()
+    interruptComputations: () => pendingInterrupt(),
+    onSettingsChanged: () => scheduleAutosave()
   });
+  if (autosave) {
+    applySettingsFromImport(autosave.settings, settings);
+    refreshSettingInputs(settings);
+    applyDisplaySettingsToCanvas(drawingManager, settings);
+    mapView.setTileSourceId(autosave.basemapId);
+    basemapStyleEl.value = autosave.basemapId;
+    if (autosave.bounds) {
+      mapView.setBounds(autosave.bounds);
+    }
+  }
   const actionControls = setupActions(drawingManager, settings, () => mapper, statusMessageEl, {
     onShadingComplete: () => {}
   });
@@ -127,25 +156,39 @@ async function init() {
       return;
     }
     const bounds = mapView.getBounds();
-    const { frame, gridRows, gridCols } = buildMapFrame(mapView, bounds);
+    const { frame, gridRows, gridCols } = buildMapFrame(mapView, bounds, settings);
     statusMessageEl.textContent = "Fetching map tiles and terrain…";
     statusOverlayEl.textContent = "Loading map tiles…";
     setWarning(null);
+    const tileSource = getTileSource(mapView.getTileSourceId());
     try {
       const [mapImage, elevationGrid] = await Promise.all([
-        renderMapFrameImage(frame),
+        renderMapFrameImage(frame, tileSource),
         fetchElevationGrid(bounds, gridRows, gridCols),
       ]);
       const geo = createGeoReference(bounds, { width: frame.width, height: frame.height });
       mapper = new GeoMapper(geo, elevationGrid);
+      const frameChanged = !currentBounds || !boundsApproxEqual(currentBounds, bounds);
       currentBounds = bounds;
       drawingManager.setBaseImage(mapImage, { resetView: true });
-      drawingManager.clearShapes();
-      drawingManager.clearHeatmap();
-      drawingManager.setShading(null, Math.max(2, Math.floor(settings.sampleStepPx)));
+      if (frameChanged) {
+        drawingManager.clearShapes();
+        drawingManager.clearHeatmap();
+        drawingManager.setShading(null, Math.max(2, Math.floor(settings.sampleStepPx)));
+      }
       drawingManager.setContours(generateContourSegments(mapper, 1));
       actionControls.setTopographyReady(true);
       statusMessageEl.textContent = "Topography loaded.";
+      if (
+        autosave &&
+        autosave.bounds &&
+        boundsApproxEqual(autosave.bounds, bounds) &&
+        drawingManager.getShapes().length === 0
+      ) {
+        drawingManager.setShapes(autosave.shapes);
+        statusMessageEl.textContent = "Topography loaded (autosave restored).";
+      }
+      scheduleAutosave();
     } catch (err) {
       console.error(err);
       statusMessageEl.textContent = `Topography load failed: ${(err as Error).message}`;
@@ -171,6 +214,21 @@ async function init() {
   });
 
   updateFrameStatus();
+
+  function scheduleAutosave() {
+    if (autosaveTimer) {
+      window.clearTimeout(autosaveTimer);
+    }
+    autosaveTimer = window.setTimeout(() => {
+      autosave = {
+        bounds: currentBounds,
+        basemapId: mapView.getTileSourceId(),
+        settings: { ...settings },
+        shapes: drawingManager.getShapes()
+      };
+      saveAutosave(autosave);
+    }, 300);
+  }
 }
 
 function setupTools(
@@ -193,12 +251,11 @@ function setupTools(
 function setupSettings(
   settings: AppSettings,
   drawingManager: ReturnType<typeof createDrawingManager>,
-  hooks?: { interruptComputations?: () => void }
+  hooks?: { interruptComputations?: () => void; onSettingsChanged?: () => void }
 ) {
-  const truckHeight = document.getElementById("truckHeight") as HTMLInputElement | null;
-  const truckLength = document.getElementById("truckLength") as HTMLInputElement | null;
-  const truckWidth = document.getElementById("truckWidth") as HTMLInputElement | null;
+  const siteHeight = document.getElementById("siteHeight") as HTMLInputElement | null;
   const viewerHeight = document.getElementById("viewerHeight") as HTMLInputElement | null;
+  const topoSpacing = document.getElementById("topoSpacing") as HTMLInputElement | null;
   const sampleStep = document.getElementById("sampleStep") as HTMLInputElement | null;
   const toggleViewers = document.getElementById("toggleViewers") as HTMLInputElement | null;
   const toggleCandidates = document.getElementById("toggleCandidates") as HTMLInputElement | null;
@@ -212,10 +269,9 @@ function setupSettings(
   const contourOpacityInput = document.getElementById("contourOpacity") as HTMLInputElement | null;
 
   if (
-    !truckHeight ||
-    !truckLength ||
-    !truckWidth ||
+    !siteHeight ||
     !viewerHeight ||
+    !topoSpacing ||
     !sampleStep ||
     !toggleViewers ||
     !toggleCandidates ||
@@ -237,15 +293,15 @@ function setupSettings(
   };
 
   const updateSettings = () => {
-    settings.truckHeightFt = ensureNumber(truckHeight, settings.truckHeightFt);
-    settings.truckLengthFt = ensureNumber(truckLength, settings.truckLengthFt);
-    settings.truckWidthFt = ensureNumber(truckWidth, settings.truckWidthFt);
+    settings.siteHeightFt = ensureNumber(siteHeight, settings.siteHeightFt);
     settings.viewerHeightFt = ensureNumber(viewerHeight, settings.viewerHeightFt);
+    settings.topoSpacingFt = Math.max(5, ensureNumber(topoSpacing, settings.topoSpacingFt));
     settings.sampleStepPx = Math.max(1, ensureNumber(sampleStep, settings.sampleStepPx));
     hooks?.interruptComputations?.();
+    hooks?.onSettingsChanged?.();
   };
 
-  [truckHeight, truckLength, truckWidth, viewerHeight, sampleStep].forEach((input) => {
+  [siteHeight, viewerHeight, topoSpacing, sampleStep].forEach((input) => {
     input.addEventListener("input", updateSettings);
   });
 
@@ -511,7 +567,7 @@ function setupActions(
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "food-truck-visibility.json";
+    a.download = "visopti-project.json";
     a.click();
     URL.revokeObjectURL(url);
     statusMessage.textContent = "Project exported.";
@@ -535,6 +591,7 @@ function setupActions(
         applyDisplaySettingsToCanvas(drawingManager, settings);
       }
       statusMessage.textContent = "Project imported.";
+      scheduleAutosave();
     } catch (err) {
       statusMessage.textContent = `Import failed: ${(err as Error).message}`;
     } finally {
@@ -548,7 +605,7 @@ function setupActions(
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "food-truck-shapes.json";
+    a.download = "visopti-shapes.json";
     a.click();
     URL.revokeObjectURL(url);
     statusMessage.textContent = "Shapes exported.";
@@ -565,6 +622,7 @@ function setupActions(
         drawingManager.setShapes(parsed as Shape[]);
         drawingManager.clearHeatmap();
         statusMessage.textContent = "Shapes imported.";
+        scheduleAutosave();
       } else {
         statusMessage.textContent = "Invalid shapes JSON.";
       }
@@ -613,10 +671,9 @@ function setupDebugProbe(
 }
 
 function applySettingsFromImport(source: Partial<AppSettings>, target: AppSettings) {
-  if (typeof source.truckHeightFt === "number") target.truckHeightFt = source.truckHeightFt;
-  if (typeof source.truckLengthFt === "number") target.truckLengthFt = source.truckLengthFt;
-  if (typeof source.truckWidthFt === "number") target.truckWidthFt = source.truckWidthFt;
+  if (typeof source.siteHeightFt === "number") target.siteHeightFt = source.siteHeightFt;
   if (typeof source.viewerHeightFt === "number") target.viewerHeightFt = source.viewerHeightFt;
+  if (typeof source.topoSpacingFt === "number") target.topoSpacingFt = source.topoSpacingFt;
   if (typeof source.sampleStepPx === "number") target.sampleStepPx = Math.max(1, source.sampleStepPx);
   if (source.overlays) {
     target.overlays.showViewers = source.overlays.showViewers ?? target.overlays.showViewers;
@@ -636,10 +693,9 @@ function applySettingsFromImport(source: Partial<AppSettings>, target: AppSettin
 
 function refreshSettingInputs(settings: AppSettings) {
   const map: Record<string, string> = {
-    truckHeight: settings.truckHeightFt.toString(),
-    truckLength: settings.truckLengthFt.toString(),
-    truckWidth: settings.truckWidthFt.toString(),
+    siteHeight: settings.siteHeightFt.toString(),
     viewerHeight: settings.viewerHeightFt.toString(),
+    topoSpacing: settings.topoSpacingFt.toString(),
     sampleStep: settings.sampleStepPx.toString(),
     viewerOpacity: settings.opacity.viewer.toString(),
     candidateOpacity: settings.opacity.candidate.toString(),
@@ -680,7 +736,7 @@ function friendlyToolName(tool: ToolMode): string {
   return lookup[tool];
 }
 
-function buildMapFrame(mapView: MapViewInstance, bounds: GeoBounds) {
+function buildMapFrame(mapView: MapViewInstance, bounds: GeoBounds, settings: AppSettings) {
   const size = mapView.getSize();
   const dpr = window.devicePixelRatio || 1;
   let width = Math.max(400, Math.round(size.width * dpr));
@@ -689,8 +745,13 @@ function buildMapFrame(mapView: MapViewInstance, bounds: GeoBounds) {
   const scale = Math.min(1, maxDimension / Math.max(width, height));
   width = Math.max(1, Math.round(width * scale));
   height = Math.max(1, Math.round(height * scale));
-  const gridRows = Math.min(64, Math.max(20, Math.round(height / 24)));
-  const gridCols = Math.min(64, Math.max(20, Math.round(width / 24)));
+  const targetSpacingM = Math.max(1, settings.topoSpacingFt) * 0.3048;
+  const latMid = (bounds.north + bounds.south) / 2;
+  const lonMid = (bounds.east + bounds.west) / 2;
+  const widthM = haversineMeters(latMid, bounds.west, latMid, bounds.east);
+  const heightM = haversineMeters(bounds.north, lonMid, bounds.south, lonMid);
+  const gridCols = clampInt(Math.round(widthM / targetSpacingM) + 1, 20, 80);
+  const gridRows = clampInt(Math.round(heightM / targetSpacingM) + 1, 20, 80);
   return {
     frame: {
       bounds,
@@ -726,10 +787,9 @@ function createPlaceholderCanvas(width: number, height: number): HTMLCanvasEleme
 
 function createDefaultSettings(): AppSettings {
   return {
-    truckHeightFt: 6,
-    truckLengthFt: 20,
-    truckWidthFt: 8,
+    siteHeightFt: 6,
     viewerHeightFt: 6,
+    topoSpacingFt: 25,
     sampleStepPx: 5,
     overlays: {
       showViewers: true,
@@ -752,8 +812,53 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+function clampInt(value: number, min: number, max: number): number {
+  return Math.min(Math.max(Math.round(value), min), max);
+}
+
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return 6371000 * c;
+}
+
 function delayFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+function boundsApproxEqual(a: GeoBounds, b: GeoBounds): boolean {
+  const epsilon = 0.0001;
+  return (
+    Math.abs(a.north - b.north) < epsilon &&
+    Math.abs(a.south - b.south) < epsilon &&
+    Math.abs(a.east - b.east) < epsilon &&
+    Math.abs(a.west - b.west) < epsilon
+  );
+}
+
+function loadAutosave(): AutosavePayload | null {
+  const raw = window.localStorage.getItem(AUTOSAVE_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as AutosavePayload;
+    if (!parsed || !parsed.settings || !parsed.shapes) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveAutosave(payload: AutosavePayload): void {
+  window.localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
 }
 
 void init().catch((err) => {

@@ -286,7 +286,7 @@ export function computeVisibilityHeatmap(
         mapper,
         obstacles,
         obstacleBoxes,
-        settings.truckHeightFt
+        settings.siteHeightFt
       );
     }
     cells.push({ pixel: candidate.pixel, score: visibleCount / totalViewers });

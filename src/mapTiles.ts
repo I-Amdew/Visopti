@@ -1,7 +1,40 @@
 import { GeoBounds } from "./types";
 
 const TILE_SIZE = 256;
-const TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+
+export type TileSourceId = "street" | "satellite";
+
+export interface TileSource {
+  id: TileSourceId;
+  label: string;
+  url: string;
+  attribution: string;
+  maxZoom: number;
+}
+
+export const TILE_SOURCES: TileSource[] = [
+  {
+    id: "street",
+    label: "Street",
+    url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    maxZoom: 19,
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  },
+  {
+    id: "satellite",
+    label: "Satellite",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    maxZoom: 19,
+    attribution:
+      "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, " +
+      "Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+  },
+];
+
+export function getTileSource(id: TileSourceId): TileSource {
+  return TILE_SOURCES.find((source) => source.id === id) ?? TILE_SOURCES[0];
+}
 
 export interface MapFrame {
   bounds: GeoBounds;
@@ -10,7 +43,10 @@ export interface MapFrame {
   height: number;
 }
 
-export async function renderMapFrameImage(frame: MapFrame): Promise<HTMLCanvasElement> {
+export async function renderMapFrameImage(
+  frame: MapFrame,
+  tileSource: TileSource
+): Promise<HTMLCanvasElement> {
   const { bounds, zoom, width, height } = frame;
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -33,7 +69,7 @@ export async function renderMapFrameImage(frame: MapFrame): Promise<HTMLCanvasEl
   const tilePromises: Promise<TileResult | null>[] = [];
   for (let x = tileRange.minX; x <= tileRange.maxX; x += 1) {
     for (let y = tileRange.minY; y <= tileRange.maxY; y += 1) {
-      const url = TILE_URL.replace("{z}", zoom.toString())
+      const url = tileSource.url.replace("{z}", zoom.toString())
         .replace("{x}", x.toString())
         .replace("{y}", y.toString());
       tilePromises.push(

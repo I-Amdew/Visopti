@@ -1,4 +1,5 @@
 import { GeoBounds } from "./types";
+import { TileSourceId, TILE_SOURCES, getTileSource } from "./mapTiles";
 
 declare const L: {
   map: (container: HTMLElement, options?: Record<string, unknown>) => any;
@@ -9,6 +10,9 @@ export interface MapView {
   getBounds(): GeoBounds;
   getZoom(): number;
   getSize(): { width: number; height: number };
+  getTileSourceId(): TileSourceId;
+  setTileSourceId(id: TileSourceId): void;
+  setBounds(bounds: GeoBounds): void;
   setLocked(locked: boolean): void;
 }
 
@@ -19,12 +23,22 @@ export function createMapView(container: HTMLElement): MapView {
   });
 
   map.setView([47.6062, -122.3321], 13);
+  requestAnimationFrame(() => {
+    map.invalidateSize();
+  });
 
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  }).addTo(map);
+  let activeTileSourceId: TileSourceId = "street";
+  const layers = new Map<TileSourceId, any>();
+  TILE_SOURCES.forEach((source) => {
+    layers.set(
+      source.id,
+      L.tileLayer(source.url, {
+        maxZoom: source.maxZoom,
+        attribution: source.attribution,
+      })
+    );
+  });
+  layers.get(activeTileSourceId)?.addTo(map);
 
   const resizeObserver = new ResizeObserver(() => {
     map.invalidateSize();
@@ -47,6 +61,30 @@ export function createMapView(container: HTMLElement): MapView {
     getSize() {
       const size = map.getSize();
       return { width: size.x, height: size.y };
+    },
+    getTileSourceId() {
+      return activeTileSourceId;
+    },
+    setTileSourceId(id: TileSourceId) {
+      if (activeTileSourceId === id) {
+        return;
+      }
+      const next = getTileSource(id);
+      const currentLayer = layers.get(activeTileSourceId);
+      const nextLayer = layers.get(next.id);
+      if (currentLayer) {
+        map.removeLayer(currentLayer);
+      }
+      if (nextLayer) {
+        nextLayer.addTo(map);
+      }
+      activeTileSourceId = next.id;
+    },
+    setBounds(bounds: GeoBounds) {
+      map.fitBounds([
+        [bounds.south, bounds.west],
+        [bounds.north, bounds.east],
+      ]);
     },
     setLocked(locked: boolean) {
       if (locked) {
