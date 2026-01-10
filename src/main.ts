@@ -92,6 +92,7 @@ const EXTRA_KEY = "__visopti";
 
 async function init() {
   const canvas = document.getElementById("mainCanvas") as HTMLCanvasElement | null;
+  const workspace = document.getElementById("workspace") as HTMLDivElement | null;
   const statusOverlay = document.getElementById("statusOverlay");
   const statusMessage = document.getElementById("statusMessage");
   const addressForm = document.getElementById("addressForm") as HTMLFormElement | null;
@@ -104,6 +105,7 @@ async function init() {
   const btnLoadTopography = document.getElementById("btnLoadTopography") as HTMLButtonElement | null;
   const basemapStyle = document.getElementById("basemapStyle") as HTMLSelectElement | null;
   const basemapWarning = document.getElementById("basemapWarning");
+  const btnReturnFrame = document.getElementById("btnReturnFrame") as HTMLButtonElement | null;
   const modeAuto = document.getElementById("modeAuto") as HTMLInputElement | null;
   const modeCustom = document.getElementById("modeCustom") as HTMLInputElement | null;
   const btnAutoPopulate = document.getElementById("btnAutoPopulate") as HTMLButtonElement | null;
@@ -136,7 +138,7 @@ async function init() {
   const roadShowCenterline = document.getElementById("roadShowCenterline") as HTMLInputElement | null;
   const roadCarsForward = document.getElementById("roadCarsForward") as HTMLInputElement | null;
   const roadCarsBackward = document.getElementById("roadCarsBackward") as HTMLInputElement | null;
-  if (!canvas || !statusOverlay || !statusMessage) {
+  if (!canvas || !workspace || !statusOverlay || !statusMessage) {
     throw new Error("Missing core DOM elements");
   }
   if (!addressForm || !addressInput || !addressGo) {
@@ -184,6 +186,7 @@ async function init() {
 
   const statusOverlayEl = statusOverlay;
   const statusMessageEl = statusMessage;
+  const workspaceEl = workspace;
   const addressFormEl = addressForm;
   const addressInputEl = addressInput;
   const addressGoEl = addressGo;
@@ -191,6 +194,7 @@ async function init() {
   const mapStatusEl = mapStatus;
   const basemapStyleEl = basemapStyle;
   const basemapWarningEl = basemapWarning;
+  const btnReturnFrameEl = btnReturnFrame;
   const modeAutoEl = modeAuto;
   const modeCustomEl = modeCustom;
   const btnAutoPopulateEl = btnAutoPopulate;
@@ -296,6 +300,7 @@ async function init() {
   let mapper: GeoMapper | null = null;
   let currentBounds: GeoBounds | null = null;
   let frameLocked = false;
+  let showMapWhileLocked = false;
   let autosave: LoadedProject | null = loadAutosave();
   let autosaveTimer: number | null = null;
   const drawingManager = createDrawingManager({
@@ -536,7 +541,9 @@ async function init() {
   function setEpicenterFromLatLon(lat: number, lon: number) {
     epicenter = { lat, lon, radiusM: epicenterRadiusM };
     pendingEpicenterPick = false;
+    showMapWhileLocked = false;
     updateEpicenterUI();
+    updateFrameStatus();
     statusMessageEl.textContent = "Epicenter set.";
     scheduleAutosave();
   }
@@ -601,14 +608,16 @@ async function init() {
     statusMessageEl.textContent =
       reason === "refresh" ? "Refreshing roads and buildings…" : "Fetching roads and buildings…";
     try {
-      const expandedBounds = expandBounds(bounds, 3);
-      const result = await fetchOsmRoadsAndBuildings(expandedBounds, {
+      const expandedBounds = expandBounds(bounds, 2);
+      const cappedBounds = capBoundsByMeters(expandedBounds, 6000, 6000);
+      const boundsCapped = !boundsApproxEqual(expandedBounds, cappedBounds);
+      const result = await fetchOsmRoadsAndBuildings(cappedBounds, {
         signal: controller.signal
       });
       const roads = result.roads.map((road) => mapOsmRoad(road));
       const buildings = result.buildings.map((building) => mapOsmBuilding(building));
       autoData = {
-        bounds: expandedBounds,
+        bounds: cappedBounds,
         roads,
         buildings,
         fetchedAt: formatTimestamp(new Date(result.meta.fetchedAtIso)),
@@ -625,7 +634,9 @@ async function init() {
       trafficMeta = null;
       applyTrafficData();
       setTrafficStatus("Traffic cleared. Recompute for updated roads.");
-      statusMessageEl.textContent = "Auto data loaded.";
+      statusMessageEl.textContent = boundsCapped
+        ? "Auto data loaded (zoom in for more detail)."
+        : "Auto data loaded.";
       scheduleAutosave();
     } catch (err) {
       if ((err as Error).name === "AbortError") {
@@ -935,9 +946,11 @@ async function init() {
   });
   btnPickEpicenterEl.addEventListener("click", () => {
     pendingEpicenterPick = !pendingEpicenterPick;
+    showMapWhileLocked = pendingEpicenterPick && frameLocked;
     statusMessageEl.textContent = pendingEpicenterPick
       ? "Click the map to set the epicenter."
       : "Epicenter pick canceled.";
+    updateFrameStatus();
   });
 
   mapContainer.addEventListener("click", (event) => {
@@ -1093,12 +1106,20 @@ async function init() {
 
   updateStatusOverlay(null);
 
+  const setWorkspaceState = (locked: boolean) => {
+    const showMap = !locked || showMapWhileLocked;
+    workspaceEl.classList.toggle("is-locked", locked && !showMap);
+    workspaceEl.classList.toggle("is-unlocked", showMap);
+  };
+
   const updateFrameStatus = () => {
+    setWorkspaceState(frameLocked);
     if (frameLocked && currentBounds) {
       mapStatusEl.textContent = `Frame locked: N ${currentBounds.north.toFixed(4)} · S ${currentBounds.south.toFixed(4)} · W ${currentBounds.west.toFixed(4)} · E ${currentBounds.east.toFixed(4)}`;
     } else {
       mapStatusEl.textContent = "Frame unlocked: pan/zoom to set a new reference.";
     }
+    mapView.setLockedBounds(frameLocked ? currentBounds : null);
   };
 
   const unlockFrameForSearch = () => {
@@ -1106,6 +1127,7 @@ async function init() {
       return;
     }
     frameLocked = false;
+    showMapWhileLocked = false;
     mapView.setLocked(false);
     btnLockFrame.textContent = "Lock frame";
     updateFrameStatus();
@@ -1221,35 +1243,56 @@ async function init() {
       statusMessageEl.textContent = "Lock the map frame before loading topography.";
       return;
     }
-    const bounds = mapView.getBounds();
+    const bounds = currentBounds ?? mapView.getBounds();
     const { frame, gridRows, gridCols } = buildMapFrame(mapView, bounds, settings);
     statusMessageEl.textContent = "Fetching map tiles and terrain…";
     statusOverlayEl.textContent = "Loading map tiles…";
     setWarning(null);
     const tileId = getTileSourceIdForBasemap(basemapMode, autoStreetSupported);
     const tileSource = getTileSource(tileId);
+    let mapImage: HTMLCanvasElement;
     try {
-      const [mapImage, elevationGrid] = await Promise.all([
-        renderMapFrameImage(frame, tileSource, { basemapMode: tileId }),
-        fetchElevationGrid(bounds, gridRows, gridCols),
-      ]);
-      const geo = createGeoReference(bounds, { width: frame.width, height: frame.height });
+      mapImage = await renderMapFrameImage(frame, tileSource, { basemapMode: tileId });
+    } catch (err) {
+      console.error(err);
+      const message = err instanceof Error ? err.message : "Map tiles failed to load.";
+      statusMessageEl.textContent = `Topography load failed: ${message}`;
+      setWarning("Unable to load map tiles. Check your network and try again.");
+      updateStatusOverlay(null);
+      updateFrameStatus();
+      return;
+    }
+
+    statusOverlayEl.textContent = "Loading elevation data…";
+    let elevationGrid: Awaited<ReturnType<typeof fetchElevationGrid>> | null = null;
+    let elevationError: string | null = null;
+    try {
+      elevationGrid = await fetchElevationGrid(bounds, gridRows, gridCols);
+    } catch (err) {
+      console.error(err);
+      elevationError = err instanceof Error ? err.message : "Elevation data unavailable.";
+    }
+
+    const geo = createGeoReference(bounds, { width: frame.width, height: frame.height });
+    const frameChanged = !currentBounds || !boundsApproxEqual(currentBounds, bounds);
+    currentBounds = bounds;
+    applyEpicenterDefaults(bounds);
+    drawingManager.setBaseImage(mapImage, { resetView: true });
+    if (frameChanged) {
+      drawingManager.clearShapes();
+      drawingManager.clearHeatmap();
+      drawingManager.setShading(null, Math.max(2, Math.floor(settings.sampleStepPx)));
+    }
+
+    if (elevationGrid) {
       mapper = new GeoMapper(geo, elevationGrid);
       drawingManager.setGeoMapper(mapper);
-      const frameChanged = !currentBounds || !boundsApproxEqual(currentBounds, bounds);
-      currentBounds = bounds;
-      applyEpicenterDefaults(bounds);
-      drawingManager.setBaseImage(mapImage, { resetView: true });
-      if (frameChanged) {
-        drawingManager.clearShapes();
-        drawingManager.clearHeatmap();
-        drawingManager.setShading(null, Math.max(2, Math.floor(settings.sampleStepPx)));
-      }
       drawingManager.setContours(generateContourSegments(mapper, 1));
       actionControls.setTopographyReady(true);
       applyRoadMode();
       applyTrafficData();
       updateEpicenterUI();
+      setWarning(null);
       statusMessageEl.textContent = "Topography loaded.";
       if (
         pendingShapeRestore &&
@@ -1261,34 +1304,65 @@ async function init() {
         pendingShapeRestore = null;
         statusMessageEl.textContent = "Topography loaded (project restored).";
       }
-      scheduleAutosave();
-    } catch (err) {
-      console.error(err);
-      statusMessageEl.textContent = `Topography load failed: ${(err as Error).message}`;
-      setWarning("Unable to load map tiles or elevation data. Check your network and try again.");
-    } finally {
-      updateStatusOverlay(null);
-      updateFrameStatus();
+    } else {
+      mapper = null;
+      drawingManager.setGeoMapper(null);
+      drawingManager.setContours(null);
+      actionControls.setTopographyReady(false);
+      applyRoadMode();
+      applyTrafficData();
+      updateEpicenterUI();
+      const warning = elevationError ?? "Elevation data unavailable.";
+      statusMessageEl.textContent = `Map loaded. ${warning}`;
+      setWarning(warning);
+      if (
+        pendingShapeRestore &&
+        pendingShapeRestore.bounds &&
+        boundsApproxEqual(pendingShapeRestore.bounds, bounds) &&
+        drawingManager.getShapes().length === 0
+      ) {
+        drawingManager.setShapes(pendingShapeRestore.shapes);
+        pendingShapeRestore = null;
+      }
     }
+    scheduleAutosave();
+    updateStatusOverlay(null);
+    updateFrameStatus();
   };
 
   btnLockFrame.addEventListener("click", async () => {
     frameLocked = !frameLocked;
-    mapView.setLocked(frameLocked);
+    mapView.setLocked(false);
     btnLockFrame.textContent = frameLocked ? "Unlock frame" : "Lock frame";
-    updateFrameStatus();
     if (frameLocked) {
+      currentBounds = mapView.getBounds();
       await refreshTopography();
       if (roadMode === "auto") {
         await fetchAutoData("lock");
       }
+    } else {
+      showMapWhileLocked = false;
     }
+    updateFrameStatus();
     updateRoadControlsState();
   });
 
   btnLoadTopography.addEventListener("click", async () => {
     await refreshTopography();
   });
+
+  if (btnReturnFrameEl) {
+    btnReturnFrameEl.addEventListener("click", () => {
+      if (!currentBounds) {
+        statusMessageEl.textContent = "No locked frame available.";
+        return;
+      }
+      showMapWhileLocked = false;
+      mapView.setBounds(currentBounds);
+      statusMessageEl.textContent = "Returned to locked frame.";
+      updateFrameStatus();
+    });
+  }
 
   updateFrameStatus();
 
@@ -1882,7 +1956,7 @@ function createPlaceholderCanvas(width: number, height: number): HTMLCanvasEleme
   ctx.fillText("Map frame not loaded yet", 20, 32);
   ctx.fillStyle = "#6b7280";
   ctx.font = "14px 'Segoe UI', sans-serif";
-  ctx.fillText("Use the map above to pick a frame, then lock and load topography.", 20, 70);
+  ctx.fillText("Use the map to pick a frame, then lock and load topography.", 20, 70);
   return canvas;
 }
 
@@ -2467,6 +2541,20 @@ function expandBounds(bounds: GeoBounds, scale: number): GeoBounds {
     east: lonMid + halfLon,
     west: lonMid - halfLon
   };
+}
+
+function capBoundsByMeters(bounds: GeoBounds, maxWidthM: number, maxHeightM: number): GeoBounds {
+  const latMid = (bounds.north + bounds.south) / 2;
+  const lonMid = (bounds.east + bounds.west) / 2;
+  const widthM = haversineMeters(latMid, bounds.west, latMid, bounds.east);
+  const heightM = haversineMeters(bounds.north, lonMid, bounds.south, lonMid);
+  const widthScale = maxWidthM / Math.max(1, widthM);
+  const heightScale = maxHeightM / Math.max(1, heightM);
+  const scale = Math.min(1, widthScale, heightScale);
+  if (scale >= 1) {
+    return bounds;
+  }
+  return expandBounds(bounds, scale);
 }
 
 function screenPointToLatLon(

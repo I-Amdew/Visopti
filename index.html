@@ -15,27 +15,23 @@
   </head>
   <body>
     <div id="app">
-      <div id="workspace">
-        <div class="map-wrapper">
-          <div id="mapView"></div>
-          <form id="addressForm" class="address-bar" role="search">
-            <input
-              id="addressInput"
-              type="search"
-              name="address"
-              placeholder="Search address or place"
-              aria-label="Search address"
-              autocomplete="street-address"
-              enterkeyhint="search"
-            />
-            <button id="addressGo" type="submit">Go</button>
-          </form>
-          <div id="mapStatus" class="map-status">Frame unlocked: pan/zoom to set a new reference.</div>
-        </div>
-        <div class="canvas-wrapper">
-          <canvas id="mainCanvas" width="800" height="600"></canvas>
-          <div id="statusOverlay">Loading…</div>
-        </div>
+      <div id="workspace" class="is-unlocked">
+        <div id="mapView" class="stage-layer"></div>
+        <canvas id="mainCanvas" class="stage-layer" width="800" height="600"></canvas>
+        <form id="addressForm" class="address-bar" role="search">
+          <input
+            id="addressInput"
+            type="search"
+            name="address"
+            placeholder="Search address or place"
+            aria-label="Search address"
+            autocomplete="street-address"
+            enterkeyhint="search"
+          />
+          <button id="addressGo" type="submit">Go</button>
+        </form>
+        <div id="mapStatus" class="map-status">Frame unlocked: pan/zoom to set a new reference.</div>
+        <div id="statusOverlay">Loading…</div>
       </div>
       
       <section id="controls">
@@ -141,7 +137,7 @@
           <input id="importShapesFile" type="file" accept="application/json" />
         </label>
 
-        <details class="advanced-section">
+        <details class="advanced-section" open>
           <summary>Roads &amp; Traffic</summary>
           <div class="details-body">
             <h3>Mode</h3>

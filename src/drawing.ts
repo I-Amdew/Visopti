@@ -39,6 +39,7 @@ const ROAD_SELECT_RADIUS = 10;
 const ROAD_INSERT_RADIUS = 12;
 const ROAD_CONTROL_RADIUS = 7;
 const ROAD_ARROW_SPACING = 70;
+const ROAD_FLOW_SPACING = 32;
 const ROAD_CURVE_SAMPLES = 12;
 const ROAD_DIRECTION_SAMPLES = 10;
 
@@ -111,6 +112,7 @@ interface DrawingManagerState {
   trafficByRoadId: TrafficByRoadId;
   trafficViewState: TrafficViewState;
   trafficOverlayEnabled: boolean;
+  trafficAnimationTime: number;
   roadDirectionOverlayEnabled: boolean;
   selectedRoadId: string | null;
   selectedShapeId: string | null;
@@ -174,6 +176,7 @@ interface RoadRenderCache {
   directionPoints: RoadRenderPoint[] | null;
   bounds: RoadBounds | null;
   arrowSamples: PolylineSample[];
+  flowSamples: PolylineSample[];
   showDirectionLine: boolean;
 }
 
@@ -290,6 +293,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       showDirection: false
     },
     trafficOverlayEnabled: false,
+    trafficAnimationTime: 0,
     roadDirectionOverlayEnabled: true,
     selectedRoadId: null,
     selectedShapeId: null,
@@ -344,6 +348,9 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     pointIndex: null,
     hasDraft: false
   };
+  let trafficAnimationFrame: number | null = null;
+  let trafficAnimationActive = false;
+  let lastAnimationTime = 0;
 
   const getRoadEditSelectionSnapshot = (): RoadEditSelection => ({
     roadId: state.selectedRoadId,
@@ -364,6 +371,44 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     lastRoadEditSelection = next;
     if (changed && shouldNotify) {
       onRoadEditSelectionChanged(next);
+    }
+  };
+
+  const shouldAnimateTraffic = () =>
+    state.trafficOverlayEnabled && Object.keys(state.trafficByRoadId).length > 0;
+
+  const stopTrafficAnimation = () => {
+    if (trafficAnimationFrame !== null) {
+      cancelAnimationFrame(trafficAnimationFrame);
+      trafficAnimationFrame = null;
+    }
+    trafficAnimationActive = false;
+  };
+
+  const startTrafficAnimation = () => {
+    if (trafficAnimationActive) {
+      return;
+    }
+    trafficAnimationActive = true;
+    lastAnimationTime = performance.now();
+    const tick = (time: number) => {
+      if (!trafficAnimationActive) {
+        return;
+      }
+      const delta = Math.max(0, (time - lastAnimationTime) / 1000);
+      lastAnimationTime = time;
+      state.trafficAnimationTime = (state.trafficAnimationTime + delta) % 60;
+      redraw();
+      trafficAnimationFrame = requestAnimationFrame(tick);
+    };
+    trafficAnimationFrame = requestAnimationFrame(tick);
+  };
+
+  const updateTrafficAnimation = () => {
+    if (shouldAnimateTraffic()) {
+      startTrafficAnimation();
+    } else {
+      stopTrafficAnimation();
     }
   };
 
@@ -876,6 +921,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       directionPoints,
       bounds,
       arrowSamples: samplePolyline(renderPoints, ROAD_ARROW_SPACING),
+      flowSamples: samplePolyline(renderPoints, ROAD_FLOW_SPACING),
       showDirectionLine: !!road.showDirectionLine
     };
   }
@@ -1429,10 +1475,12 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     setTrafficData(trafficByRoadId: TrafficByRoadId, trafficViewState: TrafficViewState) {
       state.trafficByRoadId = trafficByRoadId;
       state.trafficViewState = { ...trafficViewState };
+      updateTrafficAnimation();
       redraw();
     },
     setTrafficOverlayEnabled(enabled: boolean) {
       state.trafficOverlayEnabled = enabled;
+      updateTrafficAnimation();
       redraw();
     },
     setRoadDirectionOverlayEnabled(enabled: boolean) {
@@ -1473,6 +1521,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       rebuildRoadCaches();
       rebuildBuildingCaches();
       syncRoadSelection();
+      updateTrafficAnimation();
       redraw();
     },
     getSelectedRoadId() {
@@ -1643,6 +1692,7 @@ function drawRoads(ctx: CanvasRenderingContext2D, state: DrawingManagerState) {
             const width = group.baseWidth + 1 + normalized * 4;
             strokePolyline(ctx, road.renderPoints, rgba(r, g, b, 0.85), width);
           }
+          drawTrafficFlowDots(ctx, road, traffic, state.trafficAnimationTime);
           if (state.trafficViewState.showDirection) {
             drawTrafficArrows(ctx, road, traffic);
           }
@@ -2127,6 +2177,37 @@ function drawTrafficArrows(
   if (typeof reverse === "number") {
     drawArrowSet(ctx, road.arrowSamples, reverse, -1);
   }
+}
+
+function drawTrafficFlowDots(
+  ctx: CanvasRenderingContext2D,
+  road: RoadRenderCache,
+  traffic: TrafficScores,
+  time: number
+) {
+  if (road.flowSamples.length === 0) {
+    return;
+  }
+  const normalized = normalizeTrafficScore(traffic.combined);
+  if (normalized <= 0) {
+    return;
+  }
+  const [r, g, b] = colorForRelativeScore(normalized);
+  const density = clampValue(0.12 + normalized * 0.35, 0.08, 0.5);
+  const step = Math.max(1, Math.round(1 / density));
+  const speed = 0.6 + normalized * 1.4;
+  const offset = Math.floor((time * speed * 12) % road.flowSamples.length);
+  const radius = 1.4 + normalized * 2.2;
+  ctx.save();
+  ctx.fillStyle = rgba(r, g, b, 0.9);
+  for (let i = 0; i < road.flowSamples.length; i += step) {
+    const idx = (i + offset) % road.flowSamples.length;
+    const sample = road.flowSamples[idx];
+    ctx.beginPath();
+    ctx.arc(sample.x, sample.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawArrowSet(

@@ -9,6 +9,19 @@ export interface BuildingEndpointIndex {
   matchedBuildings: number;
 }
 
+export interface ParcelEndpointIndex {
+  nodeIds: string[];
+  totalParcels: number;
+  matchedParcels: number;
+}
+
+export interface LatLonBounds {
+  north: number;
+  south: number;
+  east: number;
+  west: number;
+}
+
 export function pickEpicenterNodes(
   nodes: GraphNode[],
   epicenter: LatLon,
@@ -63,6 +76,52 @@ export function buildBuildingEndpointIndex(
   }
 
   return { nodeIds, totalBuildings, matchedBuildings };
+}
+
+export function buildParcelEndpointIndex(
+  bounds: LatLonBounds,
+  nodes: GraphNode[],
+  targetCount: number,
+  rng?: () => number
+): ParcelEndpointIndex {
+  const totalParcels = Math.max(0, Math.round(targetCount));
+  if (!nodes.length || totalParcels <= 0) {
+    return { nodeIds: [], totalParcels, matchedParcels: 0 };
+  }
+  const latRange = Math.max(0, bounds.north - bounds.south);
+  const lonRange = Math.max(0, bounds.east - bounds.west);
+  if (latRange === 0 || lonRange === 0) {
+    return { nodeIds: [], totalParcels, matchedParcels: 0 };
+  }
+
+  const aspect = lonRange / latRange;
+  const rows = Math.max(1, Math.round(Math.sqrt(totalParcels / Math.max(0.3, aspect))));
+  const cols = Math.max(1, Math.round(totalParcels / rows));
+  const cellSize = computeCellSize(nodes);
+  const grid = buildNodeGrid(nodes, cellSize);
+  const nodeIds: string[] = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    const rowPos = (row + 0.5) / rows;
+    for (let col = 0; col < cols; col += 1) {
+      const colPos = (col + 0.5) / cols;
+      let lat = bounds.south + latRange * rowPos;
+      let lon = bounds.west + lonRange * colPos;
+      if (rng) {
+        const jitterLat = (rng() - 0.5) * (latRange / rows) * 0.6;
+        const jitterLon = (rng() - 0.5) * (lonRange / cols) * 0.6;
+        lat = clamp(lat + jitterLat, bounds.south, bounds.north);
+        lon = clamp(lon + jitterLon, bounds.west, bounds.east);
+      }
+      const nearest = findNearestNode(grid, cellSize, nodes, { lat, lon });
+      if (nearest) {
+        nodeIds.push(nearest.id);
+      }
+    }
+  }
+
+  const uniqueIds = Array.from(new Set(nodeIds));
+  return { nodeIds: uniqueIds, totalParcels, matchedParcels: uniqueIds.length };
 }
 
 export function pickBuildingNode(index: BuildingEndpointIndex, rng: () => number): string | null {

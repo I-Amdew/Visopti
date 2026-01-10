@@ -1,8 +1,9 @@
 import { buildGraph, GraphNode } from "./graph";
 import {
   BuildingEndpointIndex,
+  ParcelEndpointIndex,
   buildBuildingEndpointIndex,
-  pickBuildingNode,
+  buildParcelEndpointIndex,
   pickEpicenterNodes,
   pickRandomNode,
 } from "./endpoints";
@@ -32,6 +33,8 @@ interface PresetBaseScores {
 }
 
 const DEFAULT_PRESETS: TrafficPresetName[] = ["am", "pm", "neutral"];
+const EPICENTER_SHARE = 0.6;
+const RANDOM_SHARE = 0.4;
 
 export function simulateTraffic(request: TrafficSimRequest, options: SimOptions = {}): TrafficSimResult {
   const startTime = Date.now();
@@ -39,7 +42,7 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
   const config = request.config;
   const seed = normalizeSeed(request.seed);
   const rng = createRng(seed);
-  const kRoutes = Math.max(1, Math.round(config.kRoutes ?? 3));
+  const kRoutes = Math.max(1, Math.round(config.kRoutes ?? 5));
   const presets = request.presets && request.presets.length ? request.presets : DEFAULT_PRESETS;
 
   const graph = buildGraph(roads);
@@ -57,6 +60,10 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
   );
 
   const buildingIndex = buildBuildingEndpointIndex(request.buildings, graph.nodeList);
+  const parcelCount = estimateParcelCount(request.detailLevel ?? 1);
+  const parcelIndex = buildParcelEndpointIndex(request.bounds, graph.nodeList, parcelCount, rng);
+  const endpointPool = mergeEndpointPools(buildingIndex, parcelIndex);
+  const nodePools = partitionNodesByBounds(graph.nodeList, request.bounds);
   options.onProgress?.({ phase: "endpoints", completed: 1, total: 1 });
 
   if (!epicenterNodes.length) {
@@ -66,7 +73,9 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
     console.warn("Traffic sim: no building endpoints; falling back to random nodes.");
   }
 
-  const baseTripCount = config.tripCount ?? estimateTripCount(roads.length, request.detailLevel ?? 1);
+  const baseTripCount =
+    config.tripCount ??
+    estimateTripCount(roads.length, request.detailLevel ?? 1, endpointPool.nodeIds.length);
   const tripCount = clamp(Math.round(baseTripCount), 50, 12000);
 
   const countsByPreset = new Map<TrafficPresetName, Map<RoadId, DirectionCounts>>();
@@ -86,8 +95,14 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
         cancelled = true;
         break;
       }
-      const originId = pickOriginNodeId(preset, epicenterNodes, buildingIndex, graph.nodeList, rng);
-      const destId = pickDestinationNodeId(preset, epicenterNodes, buildingIndex, graph.nodeList, rng);
+      const { originId, destId } = pickTripEndpoints(
+        preset,
+        epicenterNodes,
+        endpointPool,
+        nodePools,
+        graph.nodeList,
+        rng
+      );
       if (!originId || !destId || originId === destId) {
         continue;
       }
@@ -206,10 +221,17 @@ function normalizeCounts(counts: Map<RoadId, DirectionCounts>): Record<RoadId, P
   return result;
 }
 
-function estimateTripCount(roadCount: number, detailLevel: number): number {
+function estimateTripCount(roadCount: number, detailLevel: number, endpointCount: number): number {
   const base = Math.max(200, Math.round(roadCount * 1.2));
   const scale = clamp(detailLevel, 0.25, 3);
-  return base * scale;
+  const endpointScale = endpointCount > 0 ? clamp(endpointCount / 900, 0.6, 1.8) : 1;
+  return base * scale * endpointScale;
+}
+
+function estimateParcelCount(detailLevel: number): number {
+  const level = clamp(detailLevel, 1, 5);
+  const factor = 0.7 + (level - 1) * 0.15;
+  return clamp(Math.round(1000 * factor), 500, 1800);
 }
 
 function buildHourWeights(): Array<{ am: number; pm: number; neutral: number }> {
@@ -224,33 +246,90 @@ function buildHourWeights(): Array<{ am: number; pm: number; neutral: number }> 
   return weights;
 }
 
-function pickOriginNodeId(
-  preset: TrafficPresetName,
-  epicenterNodes: GraphNode[],
-  buildingIndex: BuildingEndpointIndex,
-  nodes: GraphNode[],
-  rng: () => number
-): string | null {
-  if (preset === "pm") {
-    return pickEpicenterNodeId(epicenterNodes, nodes, rng);
-  }
-  return pickBuildingNodeId(buildingIndex, nodes, rng);
+interface EndpointPool {
+  nodeIds: string[];
+  totalCandidates: number;
+  matchedCandidates: number;
 }
 
-function pickDestinationNodeId(
+interface NodePools {
+  inside: GraphNode[];
+  outside: GraphNode[];
+}
+
+function mergeEndpointPools(
+  buildingIndex: BuildingEndpointIndex,
+  parcelIndex: ParcelEndpointIndex
+): EndpointPool {
+  const combined = new Set<string>();
+  for (const id of buildingIndex.nodeIds) {
+    combined.add(id);
+  }
+  for (const id of parcelIndex.nodeIds) {
+    combined.add(id);
+  }
+  return {
+    nodeIds: Array.from(combined),
+    totalCandidates: buildingIndex.totalBuildings + parcelIndex.totalParcels,
+    matchedCandidates: combined.size
+  };
+}
+
+function partitionNodesByBounds(
+  nodes: GraphNode[],
+  bounds: { north: number; south: number; east: number; west: number }
+): NodePools {
+  const inside: GraphNode[] = [];
+  const outside: GraphNode[] = [];
+  for (const node of nodes) {
+    const inBounds =
+      node.lat <= bounds.north &&
+      node.lat >= bounds.south &&
+      node.lon >= bounds.west &&
+      node.lon <= bounds.east;
+    if (inBounds) {
+      inside.push(node);
+    } else {
+      outside.push(node);
+    }
+  }
+  return { inside, outside };
+}
+
+function pickTripEndpoints(
   preset: TrafficPresetName,
   epicenterNodes: GraphNode[],
-  buildingIndex: BuildingEndpointIndex,
+  endpointPool: EndpointPool,
+  nodePools: NodePools,
   nodes: GraphNode[],
   rng: () => number
-): string | null {
+): { originId: string | null; destId: string | null } {
   if (preset === "am") {
-    return pickEpicenterNodeId(epicenterNodes, nodes, rng);
+    const originId = pickEndpointNodeId(endpointPool, nodes, rng);
+    const destId =
+      rng() < EPICENTER_SHARE
+        ? pickEpicenterNodeId(epicenterNodes, nodes, rng)
+        : pickRandomOutsideNodeId(nodePools, nodes, rng);
+    return { originId, destId };
   }
   if (preset === "pm") {
-    return pickBuildingNodeId(buildingIndex, nodes, rng);
+    if (rng() < EPICENTER_SHARE) {
+      return {
+        originId: pickEpicenterNodeId(epicenterNodes, nodes, rng),
+        destId: pickEndpointNodeId(endpointPool, nodes, rng)
+      };
+    }
+    return {
+      originId: pickEndpointNodeId(endpointPool, nodes, rng),
+      destId: pickRandomOutsideNodeId(nodePools, nodes, rng)
+    };
   }
-  return pickBuildingNodeId(buildingIndex, nodes, rng);
+  const originId = pickEndpointNodeId(endpointPool, nodes, rng);
+  const destId =
+    rng() < RANDOM_SHARE
+      ? pickRandomOutsideNodeId(nodePools, nodes, rng)
+      : pickEndpointNodeId(endpointPool, nodes, rng);
+  return { originId, destId };
 }
 
 function pickEpicenterNodeId(
@@ -266,17 +345,27 @@ function pickEpicenterNodeId(
   return fallback?.id ?? null;
 }
 
-function pickBuildingNodeId(
-  buildingIndex: BuildingEndpointIndex,
+function pickEndpointNodeId(
+  endpointPool: EndpointPool,
   nodes: GraphNode[],
   rng: () => number
 ): string | null {
-  const buildingNode = pickBuildingNode(buildingIndex, rng);
-  if (buildingNode) {
-    return buildingNode;
+  if (endpointPool.nodeIds.length) {
+    const idx = Math.floor(rng() * endpointPool.nodeIds.length);
+    return endpointPool.nodeIds[Math.min(endpointPool.nodeIds.length - 1, Math.max(0, idx))];
   }
   const fallback = pickRandomNode(nodes, rng);
   return fallback?.id ?? null;
+}
+
+function pickRandomOutsideNodeId(
+  nodePools: NodePools,
+  nodes: GraphNode[],
+  rng: () => number
+): string | null {
+  const pool = nodePools.outside.length ? nodePools.outside : nodes;
+  const node = pickRandomNode(pool, rng);
+  return node?.id ?? null;
 }
 
 function buildEmptyResult(

@@ -3,9 +3,18 @@ import { Building, LatLon, Road, RoadClass, RoadDirection } from "./types";
 
 export const OVERPASS_DEFAULT_ENDPOINT = "https://overpass-api.de/api/interpreter";
 
+const OVERPASS_FALLBACK_ENDPOINTS = [
+  OVERPASS_DEFAULT_ENDPOINT,
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.nchc.org.tw/api/interpreter",
+];
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_TYPES_KEY = "roads,buildings";
 const SHOW_DIRECTION_DEFAULT = true; // Default for new OSM roads.
+const MAX_RETRIES = 2;
+const RETRY_BASE_MS = 600;
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 type OverpassTags = Record<string, string>;
 
@@ -57,9 +66,11 @@ export async function fetchOsmRoadsAndBuildings(
   bounds: GeoBounds,
   opts: { endpoint?: string; signal?: AbortSignal } = {}
 ): Promise<OsmFetchResult> {
-  const endpoint = (opts.endpoint ?? OVERPASS_DEFAULT_ENDPOINT).trim();
+  const endpointInput = (opts.endpoint ?? "").trim();
+  const endpoints = endpointInput ? [endpointInput] : OVERPASS_FALLBACK_ENDPOINTS;
+  const endpointKey = endpointInput || "auto";
   const normalizedBounds = normalizeBounds(bounds);
-  const cacheKey = buildCacheKey(endpoint, normalizedBounds);
+  const cacheKey = buildCacheKey(endpointKey, normalizedBounds);
   const cached = readCache(cacheKey);
   if (cached) {
     return cached;
@@ -67,48 +78,34 @@ export async function fetchOsmRoadsAndBuildings(
 
   const query = buildOverpassQuery(normalizedBounds);
   const promise = (async () => {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      body: new URLSearchParams({ data: query }),
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      },
-      signal: opts.signal,
-    });
-
-    if (!response.ok) {
-      const detail = await safeReadText(response);
-      const cleaned = detail.replace(/\s+/g, " ").trim();
-      const snippet = cleaned ? ` ${cleaned.slice(0, 300)}` : "";
-      throw new Error(
-        `Overpass request failed (${response.status} ${response.statusText}).${snippet}`
-      );
+    let lastError: Error | null = null;
+    for (const endpoint of endpoints) {
+      try {
+        const payload = await requestOverpass(endpoint, query, opts.signal);
+        const { roads, buildings, nodeCount, wayCount } = parseOverpassPayload(payload);
+        return {
+          roads,
+          buildings,
+          meta: {
+            fetchedAtIso: new Date().toISOString(),
+            bbox: normalizedBounds,
+            counts: {
+              roads: roads.length,
+              buildings: buildings.length,
+              nodes: nodeCount,
+              ways: wayCount,
+            },
+            endpoint,
+          },
+        };
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
+        lastError = error as Error;
+      }
     }
-
-    let payload: OverpassResponse;
-    try {
-      payload = (await response.json()) as OverpassResponse;
-    } catch (error) {
-      throw new Error("Overpass response was not valid JSON.");
-    }
-
-    const { roads, buildings, nodeCount, wayCount } = parseOverpassPayload(payload);
-
-    return {
-      roads,
-      buildings,
-      meta: {
-        fetchedAtIso: new Date().toISOString(),
-        bbox: normalizedBounds,
-        counts: {
-          roads: roads.length,
-          buildings: buildings.length,
-          nodes: nodeCount,
-          ways: wayCount,
-        },
-        endpoint,
-      },
-    };
+    throw lastError ?? new Error("Overpass request failed.");
   })();
 
   writeCache(cacheKey, promise);
@@ -360,6 +357,97 @@ async function safeReadText(response: Response): Promise<string> {
   } catch (error) {
     return "";
   }
+}
+
+async function requestOverpass(
+  endpoint: string,
+  query: string,
+  signal?: AbortSignal
+): Promise<OverpassResponse> {
+  let attempt = 0;
+  while (true) {
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        body: new URLSearchParams({ data: query }),
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+        signal,
+      });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+      if (attempt < MAX_RETRIES) {
+        await sleep(computeBackoffMs(attempt, null));
+        attempt += 1;
+        continue;
+      }
+      throw new Error("Overpass unavailable. Check your network and try again.");
+    }
+
+    if (response.ok) {
+      try {
+        return (await response.json()) as OverpassResponse;
+      } catch (error) {
+        throw new Error("Overpass response was not valid JSON.");
+      }
+    }
+
+    const retryAfterMs = parseRetryAfterMs(response.headers.get("Retry-After"));
+    if (RETRYABLE_STATUS.has(response.status) && attempt < MAX_RETRIES) {
+      await sleep(computeBackoffMs(attempt, retryAfterMs));
+      attempt += 1;
+      continue;
+    }
+
+    const detail = await safeReadText(response);
+    throw new Error(buildOverpassErrorMessage(response, detail));
+  }
+}
+
+function buildOverpassErrorMessage(response: Response, detail: string): string {
+  if (response.status === 429) {
+    return "Overpass rate-limited. Wait a minute and try again.";
+  }
+  if (response.status === 502 || response.status === 503 || response.status === 504) {
+    return "Overpass timed out. Zoom in and try again.";
+  }
+  const cleaned = detail.replace(/\s+/g, " ").trim();
+  const snippet = cleaned ? ` ${cleaned.slice(0, 300)}` : "";
+  return `Overpass request failed (${response.status} ${response.statusText}).${snippet}`;
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const seconds = Number.parseFloat(value);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, seconds * 1000);
+  }
+  const dateMs = Date.parse(value);
+  if (!Number.isFinite(dateMs)) {
+    return null;
+  }
+  return Math.max(0, dateMs - Date.now());
+}
+
+function computeBackoffMs(attempt: number, retryAfterMs: number | null): number {
+  const base = RETRY_BASE_MS * 2 ** attempt;
+  const jitter = RETRY_BASE_MS * 0.3 * Math.random();
+  const retry = retryAfterMs ?? 0;
+  return Math.max(base, retry) + jitter;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function clampLat(value: number): number {

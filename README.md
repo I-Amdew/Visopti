@@ -37,7 +37,7 @@ The elevation requests are batched and the sampling density is adjustable (in fe
 Roads/traffic/buildings live under advanced controls in the control panel: **Mode**, **Auto data**, **Epicenter**, **Traffic**, **Road tools**.
 - **Auto mode / Custom mode.** Use **Auto mode** for OSM roads/buildings or **Custom mode** to draw your own.
 - **Auto-populate roads & buildings.** Pulls OSM roads and building footprints for the locked frame; use **Refresh auto data** to update.
-- **Epicenter.** Click **Set epicenter by click** and adjust **Radius (m)** to bias flow.
+- **Epicenter.** Defaults to the locked-frame center; use **Set epicenter by click** and adjust **Radius (m)** to bias flow.
 - **Traffic.** Choose **Preset** (AM rush, PM rush, Neutral, Hourly), set **Detail level**, then **Compute traffic**. Toggle **Show traffic overlay** or **Show direction arrows**.
 - **Road tools.** **Add custom road**, **Edit selected road**, **Delete selected road**; set **One-way**, **Show direction line**, **Cars/hour forward**, **Cars/hour backward** (custom roads only).
 

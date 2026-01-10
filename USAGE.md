@@ -34,7 +34,7 @@ In **Mode**, select **Auto mode** for OSM roads/buildings or **Custom mode** to 
 In **Auto data**, click **Auto-populate roads & buildings** for the locked frame. Use **Refresh auto data** to update.
 
 ### 3) Set epicenter and radius
-In **Epicenter**, click **Set epicenter by click**, then adjust **Radius (m)**.
+In **Epicenter**, the center defaults to the locked frame. Click **Set epicenter by click** to move it, then adjust **Radius (m)**.
 
 ### 4) Compute traffic
 In **Traffic**, choose **Preset** (AM rush, PM rush, Neutral, Hourly). If you pick **Hourly**, set **Hour**. Set **Detail level**, then click **Compute traffic**. Toggle **Show traffic overlay** or **Show direction arrows** when needed.

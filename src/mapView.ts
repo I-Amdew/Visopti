@@ -4,6 +4,10 @@ import { TileSourceId, TILE_SOURCES, getTileSource } from "./mapTiles";
 declare const L: {
   map: (container: HTMLElement, options?: Record<string, unknown>) => any;
   tileLayer: (url: string, options?: Record<string, unknown>) => any;
+  rectangle: (
+    bounds: [[number, number], [number, number]],
+    options?: Record<string, unknown>
+  ) => any;
 };
 
 export interface MapView {
@@ -14,6 +18,7 @@ export interface MapView {
   setTileSourceId(id: TileSourceId): void;
   setBounds(bounds: GeoBounds): void;
   setLocked(locked: boolean): void;
+  setLockedBounds(bounds: GeoBounds | null): void;
 }
 
 export function createMapView(container: HTMLElement): MapView {
@@ -29,6 +34,7 @@ export function createMapView(container: HTMLElement): MapView {
 
   let activeTileSourceId: TileSourceId = "street";
   const layers = new Map<TileSourceId, any>();
+  let lockedBoundsLayer: any | null = null;
   TILE_SOURCES.forEach((source) => {
     layers.set(
       source.id,
@@ -85,6 +91,31 @@ export function createMapView(container: HTMLElement): MapView {
         [bounds.south, bounds.west],
         [bounds.north, bounds.east],
       ]);
+    },
+    setLockedBounds(bounds: GeoBounds | null) {
+      if (!bounds) {
+        if (lockedBoundsLayer) {
+          map.removeLayer(lockedBoundsLayer);
+          lockedBoundsLayer = null;
+        }
+        return;
+      }
+      const rectBounds: [[number, number], [number, number]] = [
+        [bounds.south, bounds.west],
+        [bounds.north, bounds.east],
+      ];
+      if (!lockedBoundsLayer) {
+        lockedBoundsLayer = L.rectangle(rectBounds, {
+          color: "#ff2d2d",
+          weight: 3,
+          opacity: 0.95,
+          fill: false,
+          interactive: false,
+        });
+        lockedBoundsLayer.addTo(map);
+      } else {
+        lockedBoundsLayer.setBounds(rectBounds);
+      }
     },
     setLocked(locked: boolean) {
       if (locked) {
