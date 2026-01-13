@@ -1,5 +1,5 @@
 # Visopti 
-## This repo is undergoing significant overhaul, stay tuned.
+## **__This repo is undergoing significant overhaul, stay tuned.__**
 
 Visopti is a lightweight web app for evaluating line-of-sight coverage in real-world terrain. Use the map to pick any location, lock the frame, pull live topography, and sketch viewer, candidate, and obstacle zones directly on the canvas.
 
