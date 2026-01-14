@@ -12,18 +12,36 @@ import {
   RoadOneway,
   RoadSource,
   RoadTraffic,
+  Sign,
   Shape,
+  TrafficSignal,
+  Tree,
+  ZoneType,
+  StructureParams,
   TrafficByRoadId,
   TrafficConfig,
+  TrafficFlowDensity,
   TrafficDirectionalScores,
   TrafficViewState
 } from "./types";
+import {
+  DEFAULT_SIGN_DIMENSIONS,
+  DEFAULT_SIGN_HEIGHT_SOURCE,
+  DEFAULT_SIGN_KIND,
+  DEFAULT_SIGN_YAW_DEGREES,
+  DEFAULT_TREE_HEIGHT_SOURCE,
+  DEFAULT_TREE_RADIUS_METERS,
+  DEFAULT_TREE_TYPE,
+  deriveTreeHeightMeters
+} from "./obstacles";
 import type { TileSourceId } from "./mapTiles";
 import { TILE_SOURCES } from "./mapTiles";
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 const HOURS_PER_DAY = 24;
+const TRAFFIC_HOUR_MIN = 6;
+const TRAFFIC_HOUR_MAX = 20;
 const DEFAULT_BASEMAP_ID: TileSourceId = TILE_SOURCES[0]?.id ?? "street";
 const VALID_BASEMAP_IDS = new Set<TileSourceId>(TILE_SOURCES.map((source) => source.id));
 const ROAD_CLASS_SET = new Set<RoadClass>([
@@ -56,16 +74,25 @@ export interface RuntimeProjectState {
   basemapId?: TileSourceId;
   settings: AppSettings;
   shapes: Shape[];
+  trees?: Tree[];
+  signs?: Sign[];
+  structure?: StructureParams;
   roadMode?: string;
   autoData?: {
     bounds?: GeoBounds | null;
     roads?: Road[];
     buildings?: Building[];
+    trees?: Tree[];
+    signs?: Sign[];
+    trafficSignals?: TrafficSignal[];
     fetchedAt?: string | null;
     endpoint?: string | null;
   };
   autoRoads?: Road[];
   autoBuildings?: Building[];
+  autoTrees?: Tree[];
+  autoSigns?: Sign[];
+  autoTrafficSignals?: TrafficSignal[];
   customRoads?: Road[];
   epicenter?: { lat: number; lon: number; radiusM: number } | null;
   traffic?: { config?: TrafficConfig; data?: TrafficByRoadId | null };
@@ -77,8 +104,18 @@ export function serializeProject(state: RuntimeProjectState): ProjectPayload {
   const warnings: string[] = [];
   const settings = readSettings(state.settings, warnings);
   const shapes = readShapes(state.shapes, warnings);
+  const trees = readTrees(state.trees, warnings, "trees");
+  const signs = readSigns(state.signs, warnings, "signs");
+  const structure = readStructure(state.structure, warnings);
   const autoRoads = readRoads(resolveAutoRoads(state), warnings, "autoRoads", "osm");
   const autoBuildings = readBuildings(resolveAutoBuildings(state), warnings, "autoBuildings");
+  const autoTrees = readTrees(resolveAutoTrees(state), warnings, "autoTrees");
+  const autoSigns = readSigns(resolveAutoSigns(state), warnings, "autoSigns");
+  const autoTrafficSignals = readTrafficSignals(
+    resolveAutoTrafficSignals(state),
+    warnings,
+    "autoTrafficSignals"
+  );
   const customRoads = readRoads(state.customRoads, warnings, "customRoads", "custom");
   const trafficConfig = resolveTrafficConfig(state, warnings);
   const trafficView = resolveTrafficView(state, trafficConfig, warnings);
@@ -89,9 +126,15 @@ export function serializeProject(state: RuntimeProjectState): ProjectPayload {
     basemapId: resolveBasemapId(state),
     settings,
     shapes,
+    structure,
     autoRoads: normalizeTrafficScores(autoRoads, trafficConfig),
     autoBuildings,
+    autoTrees,
+    autoSigns,
+    autoTrafficSignals,
     customRoads: normalizeTrafficScores(customRoads, trafficConfig),
+    trees,
+    signs,
     trafficConfig,
     trafficView
   };
@@ -159,6 +202,36 @@ function resolveAutoBuildings(state: RuntimeProjectState): unknown {
   return [];
 }
 
+function resolveAutoTrees(state: RuntimeProjectState): unknown {
+  if (Array.isArray(state.autoTrees)) {
+    return state.autoTrees;
+  }
+  if (state.autoData && Array.isArray(state.autoData.trees)) {
+    return state.autoData.trees;
+  }
+  return [];
+}
+
+function resolveAutoSigns(state: RuntimeProjectState): unknown {
+  if (Array.isArray(state.autoSigns)) {
+    return state.autoSigns;
+  }
+  if (state.autoData && Array.isArray(state.autoData.signs)) {
+    return state.autoData.signs;
+  }
+  return [];
+}
+
+function resolveAutoTrafficSignals(state: RuntimeProjectState): unknown {
+  if (Array.isArray(state.autoTrafficSignals)) {
+    return state.autoTrafficSignals;
+  }
+  if (state.autoData && Array.isArray(state.autoData.trafficSignals)) {
+    return state.autoData.trafficSignals;
+  }
+  return [];
+}
+
 function resolveTrafficConfig(state: RuntimeProjectState, warnings: string[]): TrafficConfig {
   if (state.traffic?.config) {
     return readTrafficConfig(state.traffic.config, warnings);
@@ -181,7 +254,7 @@ function resolveTrafficView(
 }
 
 function normalizeTrafficScores(roads: Road[], trafficConfig: TrafficConfig): Road[] {
-  const hour = clampHour(trafficConfig.hour);
+  const hour = clampTrafficHour(trafficConfig.hour);
   return roads.map((road) => {
     if (!road.traffic) {
       return road;
@@ -240,6 +313,7 @@ function normalizePayload(raw: unknown, warnings: string[]): ProjectState {
   const basemapId = readBasemapId(raw.basemapId ?? raw.basemapMode, warnings);
   const settings = readSettings(raw.settings, warnings);
   const shapes = readShapes(raw.shapes, warnings);
+  const structure = readStructure(raw.structure, warnings);
 
   if (schemaVersion < 2) {
     return {
@@ -247,7 +321,8 @@ function normalizePayload(raw: unknown, warnings: string[]): ProjectState {
       bounds,
       basemapId,
       settings,
-      shapes
+      shapes,
+      structure
     };
   }
 
@@ -256,8 +331,18 @@ function normalizePayload(raw: unknown, warnings: string[]): ProjectState {
     basemapId,
     settings,
     shapes,
+    trees: readTrees(raw.trees, warnings, "trees"),
+    signs: readSigns(raw.signs, warnings, "signs"),
+    structure,
     autoRoads: readRoads(raw.autoRoads, warnings, "autoRoads", "osm"),
     autoBuildings: readBuildings(raw.autoBuildings, warnings, "autoBuildings"),
+    autoTrees: readTrees(raw.autoTrees, warnings, "autoTrees"),
+    autoSigns: readSigns(raw.autoSigns, warnings, "autoSigns"),
+    autoTrafficSignals: readTrafficSignals(
+      raw.autoTrafficSignals,
+      warnings,
+      "autoTrafficSignals"
+    ),
     customRoads: readRoads(raw.customRoads, warnings, "customRoads", "custom"),
     trafficConfig: readTrafficConfig(raw.trafficConfig, warnings),
     trafficView: readTrafficView(raw.trafficView, warnings, undefined)
@@ -282,14 +367,25 @@ function toRuntimeState(payload: ProjectState, warnings: string[]): RuntimeProje
     basemapId: payload.basemapId,
     settings: payload.settings,
     shapes: payload.shapes,
+    trees: payload.trees,
+    signs: payload.signs,
+    structure: payload.structure,
     roadMode,
     autoData: {
       bounds: payload.bounds,
       roads: payload.autoRoads,
       buildings: payload.autoBuildings,
+      trees: payload.autoTrees,
+      signs: payload.autoSigns,
+      trafficSignals: payload.autoTrafficSignals,
       fetchedAt: null,
       endpoint: null
     },
+    autoRoads: payload.autoRoads,
+    autoBuildings: payload.autoBuildings,
+    autoTrees: payload.autoTrees,
+    autoSigns: payload.autoSigns,
+    autoTrafficSignals: payload.autoTrafficSignals,
     customRoads: payload.customRoads,
     epicenter: null,
     traffic: {
@@ -308,7 +404,7 @@ function buildTrafficByRoadId(
   if (!roads.length) {
     return null;
   }
-  const baseHour = clampHour(view.hour);
+  const baseHour = clampTrafficHour(view.hour);
   const byRoad: TrafficByRoadId = {};
   for (const road of roads) {
     const traffic = road.traffic ? normalizeRoadTraffic(road.traffic, baseHour) : undefined;
@@ -361,11 +457,30 @@ function createDefaultProjectState(): ProjectState {
     basemapId: DEFAULT_BASEMAP_ID,
     settings: createDefaultSettings(),
     shapes: [],
+    trees: [],
+    signs: [],
+    structure: createDefaultStructure(),
     autoRoads: [],
     autoBuildings: [],
+    autoTrees: [],
+    autoSigns: [],
+    autoTrafficSignals: [],
     customRoads: [],
     trafficConfig,
     trafficView: createDefaultTrafficView(trafficConfig)
+  };
+}
+
+function createDefaultStructure(): StructureParams {
+  return {
+    heightFt: 30,
+    footprint: {
+      widthFt: 60,
+      lengthFt: 90
+    },
+    placeAtCenter: true,
+    centerPx: { x: 0, y: 0 },
+    rotationDeg: 0
   };
 }
 
@@ -373,8 +488,13 @@ function createDefaultSettings(): AppSettings {
   return {
     siteHeightFt: 6,
     viewerHeightFt: 6,
+    viewDistanceFt: 2000,
     topoSpacingFt: 25,
     sampleStepPx: 5,
+    frame: {
+      maxSideFt: 2640,
+      minSideFt: 300
+    },
     overlays: {
       showViewers: true,
       showCandidates: true,
@@ -395,20 +515,55 @@ function createDefaultSettings(): AppSettings {
 function createDefaultTrafficConfig(): TrafficConfig {
   return {
     preset: "neutral",
-    hour: 8,
+    hour: 12,
     detail: 3,
     showOverlay: true,
     showDirectionArrows: false,
-    seed: 0
+    flowDensity: "medium",
+    seed: 0,
+    centralShare: 0.6
   };
 }
 
 function createDefaultTrafficView(config?: TrafficConfig): TrafficViewState {
+  const preset = normalizeTrafficPreset(config?.preset ?? "neutral");
   return {
-    preset: config?.preset ?? "neutral",
-    hour: clampHour(config?.hour ?? 8),
-    showDirection: config?.showDirectionArrows ?? false
+    preset,
+    hour: clampTrafficHour(config?.hour ?? defaultTrafficHourForPreset(preset)),
+    showDirection: config?.showDirectionArrows ?? false,
+    flowDensity: normalizeTrafficFlowDensity(config?.flowDensity ?? "medium")
   };
+}
+
+function normalizeTrafficPreset(value: string): string {
+  if (value === "am" || value === "pm" || value === "neutral") {
+    return value;
+  }
+  return "neutral";
+}
+
+function defaultTrafficHourForPreset(preset: string): number {
+  if (preset === "am") {
+    return 8;
+  }
+  if (preset === "pm") {
+    return 17;
+  }
+  return 12;
+}
+
+function normalizeTrafficFlowDensity(value: string): TrafficFlowDensity {
+  if (value === "low" || value === "medium" || value === "high") {
+    return value;
+  }
+  return "medium";
+}
+
+function clampTrafficHour(value: number): number {
+  const hour = Math.floor(value);
+  if (hour < TRAFFIC_HOUR_MIN) return TRAFFIC_HOUR_MIN;
+  if (hour > TRAFFIC_HOUR_MAX) return TRAFFIC_HOUR_MAX;
+  return hour;
 }
 
 function clampHour(value: number): number {
@@ -559,6 +714,9 @@ function readSettings(value: unknown, warnings: string[]): AppSettings {
       warnings,
       "settings.viewerHeightFt"
     ),
+    viewDistanceFt:
+      readOptionalNumber(value.viewDistanceFt, warnings, "settings.viewDistanceFt") ??
+      defaults.viewDistanceFt,
     topoSpacingFt: readNumber(
       value.topoSpacingFt,
       defaults.topoSpacingFt,
@@ -571,8 +729,90 @@ function readSettings(value: unknown, warnings: string[]): AppSettings {
       warnings,
       "settings.sampleStepPx"
     ),
+    frame: readFrameSettings(value.frame, defaults.frame, warnings),
     overlays: readOverlaySettings(value.overlays, defaults.overlays, warnings),
     opacity: readOpacitySettings(value.opacity, defaults.opacity, warnings)
+  };
+}
+
+function readStructure(value: unknown, warnings: string[]): StructureParams {
+  const defaults = createDefaultStructure();
+  if (!isRecord(value)) {
+    if (value !== undefined) {
+      warnings.push("Invalid structure; using defaults.");
+    }
+    return defaults;
+  }
+  const footprint = isRecord(value.footprint) ? value.footprint : {};
+  const center = isRecord(value.centerPx) ? value.centerPx : {};
+  return {
+    heightFt: Math.max(
+      1,
+      readNumber(value.heightFt, defaults.heightFt, warnings, "structure.heightFt")
+    ),
+    footprint: {
+      widthFt: Math.max(
+        1,
+        readNumber(
+          footprint.widthFt,
+          defaults.footprint.widthFt,
+          warnings,
+          "structure.footprint.widthFt"
+        )
+      ),
+      lengthFt: Math.max(
+        1,
+        readNumber(
+          footprint.lengthFt,
+          defaults.footprint.lengthFt,
+          warnings,
+          "structure.footprint.lengthFt"
+        )
+      )
+    },
+    placeAtCenter: readBoolean(
+      value.placeAtCenter,
+      defaults.placeAtCenter,
+      warnings,
+      "structure.placeAtCenter"
+    ),
+    centerPx: {
+      x: readNumber(center.x, defaults.centerPx.x, warnings, "structure.centerPx.x"),
+      y: readNumber(center.y, defaults.centerPx.y, warnings, "structure.centerPx.y")
+    },
+    rotationDeg: readNumber(
+      value.rotationDeg,
+      defaults.rotationDeg,
+      warnings,
+      "structure.rotationDeg"
+    )
+  };
+}
+
+function readFrameSettings(
+  value: unknown,
+  defaults: AppSettings["frame"],
+  warnings: string[]
+): AppSettings["frame"] {
+  if (!isRecord(value)) {
+    if (value !== undefined) {
+      warnings.push("Invalid settings.frame; using defaults.");
+    }
+    return { ...defaults };
+  }
+  return {
+    maxSideFt: readNumber(
+      value.maxSideFt,
+      defaults.maxSideFt,
+      warnings,
+      "settings.frame.maxSideFt"
+    ),
+    minSideFt: readNumber(
+      value.minSideFt,
+      defaults.minSideFt,
+      warnings,
+      "settings.frame.minSideFt"
+    )
   };
 }
 
@@ -644,8 +884,13 @@ function readOpacitySettings(
 function readShapes(value: unknown, warnings: string[]): Shape[] {
   const rawShapes = readArray(value, warnings, "shapes", true);
   const shapes: Shape[] = [];
+  const nameCounts: Record<ZoneType, number> = {
+    obstacle: 0,
+    candidate: 0,
+    viewer: 0
+  };
   rawShapes.forEach((raw, index) => {
-    const shape = readShape(raw, warnings, `shapes[${index}]`, index);
+    const shape = readShape(raw, warnings, `shapes[${index}]`, index, nameCounts);
     if (shape) {
       shapes.push(shape);
     }
@@ -657,7 +902,8 @@ function readShape(
   value: unknown,
   warnings: string[],
   path: string,
-  index: number
+  index: number,
+  nameCounts: Record<ZoneType, number>
 ): Shape | null {
   if (!isRecord(value)) {
     warnings.push(`Invalid ${path}; skipping.`);
@@ -671,6 +917,14 @@ function readShape(
   const id = readString(value.id, `shape-${index}`, warnings, `${path}.id`);
   const type = readZoneType(value.type, warnings, `${path}.type`);
   const alpha = readNumber(value.alpha, 1, warnings, `${path}.alpha`);
+  const nameCount = (nameCounts[type] ?? 0) + 1;
+  nameCounts[type] = nameCount;
+  const name = normalizeShapeName(
+    readOptionalString(value.name, warnings, `${path}.name`),
+    defaultShapeName(type, nameCount)
+  );
+  const color = normalizeShapeColor(readOptionalString(value.color, warnings, `${path}.color`));
+  const visible = readBoolean(value.visible, true, warnings, `${path}.visible`);
   const direction = readViewerDirection(value.direction, warnings, `${path}.direction`);
   const viewerAnchor = readPixelPoint(value.viewerAnchor, warnings, `${path}.viewerAnchor`);
 
@@ -680,7 +934,7 @@ function readShape(
       warnings.push(`Invalid ${path}.points; expected at least 3 points.`);
       return null;
     }
-    const shape: Shape = { id, kind, type, alpha, points };
+    const shape: Shape = { id, name, kind, type, alpha, color, visible, points };
     if (direction) {
       shape.direction = direction;
     }
@@ -694,7 +948,7 @@ function readShape(
   const y = readNumber(value.y, 0, warnings, `${path}.y`);
   const width = readNumber(value.width, 0, warnings, `${path}.width`);
   const height = readNumber(value.height, 0, warnings, `${path}.height`);
-  const shape: Shape = { id, kind, type, alpha, x, y, width, height };
+  const shape: Shape = { id, name, kind, type, alpha, color, visible, x, y, width, height };
   if (direction) {
     shape.direction = direction;
   }
@@ -704,12 +958,34 @@ function readShape(
   return shape;
 }
 
-function readZoneType(value: unknown, warnings: string[], path: string) {
+function readZoneType(value: unknown, warnings: string[], path: string): ZoneType {
   if (value === "obstacle" || value === "candidate" || value === "viewer") {
     return value;
   }
   warnings.push(`Invalid ${path}; defaulting to obstacle.`);
   return "obstacle";
+}
+
+function defaultShapeName(type: ZoneType, index: number): string {
+  const label =
+    type === "candidate" ? "Candidate" : type === "viewer" ? "Viewer" : "Obstacle";
+  return `${label} ${index}`;
+}
+
+function normalizeShapeName(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  return trimmed;
+}
+
+function normalizeShapeColor(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed;
 }
 
 function readViewerDirection(
@@ -1133,6 +1409,11 @@ function readBuilding(
   }
   const height = readOptionalNumber(value.height, warnings, `${path}.height`);
   const heightM = readOptionalNumber(value.heightM, warnings, `${path}.heightM`);
+  const userHeightMeters = readOptionalNumber(
+    value.userHeightMeters,
+    warnings,
+    `${path}.userHeightMeters`
+  );
   const tags = mergeTags(
     readTags(value.tags, warnings, `${path}.tags`),
     readOptionalString(value.name, warnings, `${path}.name`)
@@ -1142,10 +1423,241 @@ function readBuilding(
   if (resolvedHeight !== undefined) {
     building.height = resolvedHeight;
   }
+  if (userHeightMeters !== undefined) {
+    building.userHeightMeters = userHeightMeters;
+  }
   if (tags) {
     building.tags = tags;
   }
   return building;
+}
+
+function readTrees(value: unknown, warnings: string[], path: string): Tree[] {
+  const raw = readArray(value, warnings, path);
+  const trees: Tree[] = [];
+  raw.forEach((entry, index) => {
+    const tree = readTree(entry, warnings, `${path}[${index}]`, `${path}-${index}`);
+    if (tree) {
+      trees.push(tree);
+    }
+  });
+  return trees;
+}
+
+function readTree(
+  value: unknown,
+  warnings: string[],
+  path: string,
+  fallbackId: string
+): Tree | null {
+  if (!isRecord(value)) {
+    warnings.push(`Invalid ${path}; skipping.`);
+    return null;
+  }
+  const id = readString(value.id, fallbackId, warnings, `${path}.id`);
+  const location = readPointLocation(value, warnings, `${path}.location`);
+  if (!location) {
+    return null;
+  }
+  const type = normalizeTreeType(value.type) ?? DEFAULT_TREE_TYPE;
+  const baseRadiusInput = readOptionalNumber(
+    value.baseRadiusMeters ?? value.radiusMeters,
+    warnings,
+    `${path}.baseRadiusMeters`
+  );
+  const baseRadiusMeters = normalizePositiveNumber(
+    baseRadiusInput,
+    DEFAULT_TREE_RADIUS_METERS
+  );
+  let heightSource = normalizeTreeHeightSource(value.heightSource) ?? DEFAULT_TREE_HEIGHT_SOURCE;
+  const heightInput = readOptionalNumber(value.heightMeters, warnings, `${path}.heightMeters`);
+  const derivedHeight = deriveTreeHeightMeters(baseRadiusMeters);
+  let heightMeters = derivedHeight;
+  if (heightSource !== "derived") {
+    if (!Number.isFinite(heightInput) || (heightInput as number) <= 0) {
+      heightSource = "derived";
+    } else {
+      heightMeters = heightInput as number;
+    }
+  }
+  return {
+    id,
+    location,
+    type,
+    baseRadiusMeters,
+    heightMeters,
+    heightSource
+  };
+}
+
+function readSigns(value: unknown, warnings: string[], path: string): Sign[] {
+  const raw = readArray(value, warnings, path);
+  const signs: Sign[] = [];
+  raw.forEach((entry, index) => {
+    const sign = readSign(entry, warnings, `${path}[${index}]`, `${path}-${index}`);
+    if (sign) {
+      signs.push(sign);
+    }
+  });
+  return signs;
+}
+
+function readSign(
+  value: unknown,
+  warnings: string[],
+  path: string,
+  fallbackId: string
+): Sign | null {
+  if (!isRecord(value)) {
+    warnings.push(`Invalid ${path}; skipping.`);
+    return null;
+  }
+  const id = readString(value.id, fallbackId, warnings, `${path}.id`);
+  const location = readPointLocation(value, warnings, `${path}.location`);
+  if (!location) {
+    return null;
+  }
+  const kind = normalizeSignKind(value.kind) ?? DEFAULT_SIGN_KIND;
+  const defaults = DEFAULT_SIGN_DIMENSIONS[kind];
+  const widthMeters = normalizePositiveNumber(
+    readOptionalNumber(value.widthMeters, warnings, `${path}.widthMeters`),
+    defaults.widthMeters
+  );
+  const heightInput = readOptionalNumber(value.heightMeters, warnings, `${path}.heightMeters`);
+  const heightMeters = normalizePositiveNumber(heightInput, defaults.heightMeters);
+  const bottomClearanceMeters = normalizeNonNegativeNumber(
+    readOptionalNumber(
+      value.bottomClearanceMeters,
+      warnings,
+      `${path}.bottomClearanceMeters`
+    ),
+    defaults.bottomClearanceMeters
+  );
+  const yawDegrees = normalizeNumber(
+    readOptionalNumber(value.yawDegrees ?? value.orientationDeg, warnings, `${path}.yawDegrees`),
+    DEFAULT_SIGN_YAW_DEGREES
+  );
+  let heightSource =
+    normalizeSignHeightSource(value.heightSource) ?? DEFAULT_SIGN_HEIGHT_SOURCE;
+  if (heightSource !== "default" && (!Number.isFinite(heightInput) || (heightInput as number) <= 0)) {
+    heightSource = "default";
+  }
+  return {
+    id,
+    location,
+    kind,
+    widthMeters,
+    heightMeters,
+    bottomClearanceMeters,
+    yawDegrees,
+    heightSource
+  };
+}
+
+function readTrafficSignals(
+  value: unknown,
+  warnings: string[],
+  path: string
+): TrafficSignal[] {
+  const raw = readArray(value, warnings, path);
+  const signals: TrafficSignal[] = [];
+  raw.forEach((entry, index) => {
+    const signal = readTrafficSignal(
+      entry,
+      warnings,
+      `${path}[${index}]`,
+      `${path}-${index}`
+    );
+    if (signal) {
+      signals.push(signal);
+    }
+  });
+  return signals;
+}
+
+function readTrafficSignal(
+  value: unknown,
+  warnings: string[],
+  path: string,
+  fallbackId: string
+): TrafficSignal | null {
+  if (!isRecord(value)) {
+    warnings.push(`Invalid ${path}; skipping.`);
+    return null;
+  }
+  const id = readString(value.id, fallbackId, warnings, `${path}.id`);
+  const location = readPointLocation(value, warnings, `${path}.location`);
+  if (!location) {
+    return null;
+  }
+  return { id, location };
+}
+
+function readPointLocation(
+  value: unknown,
+  warnings: string[],
+  path: string
+): MapPoint | null {
+  if (!isRecord(value)) {
+    warnings.push(`Invalid ${path}; expected object.`);
+    return null;
+  }
+  const locationCandidate = isRecord(value.location) ? value.location : value;
+  const location = parseMapPoint(locationCandidate);
+  if (!location) {
+    warnings.push(`Invalid ${path}; expected lat/lon or x/y.`);
+    return null;
+  }
+  return location;
+}
+
+function normalizeTreeType(value: unknown): Tree["type"] | null {
+  if (value === "pine" || value === "deciduous") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeTreeHeightSource(value: unknown): Tree["heightSource"] | null {
+  if (value === "derived" || value === "user_override" || value === "ml" || value === "osm") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeSignKind(value: unknown): Sign["kind"] | null {
+  if (value === "billboard" || value === "sign") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeSignHeightSource(value: unknown): Sign["heightSource"] | null {
+  if (value === "default" || value === "user_override" || value === "osm" || value === "ml") {
+    return value;
+  }
+  return null;
+}
+
+function normalizePositiveNumber(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value) || (value as number) <= 0) {
+    return fallback;
+  }
+  return value as number;
+}
+
+function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value) || (value as number) < 0) {
+    return fallback;
+  }
+  return value as number;
+}
+
+function normalizeNumber(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return value as number;
 }
 
 function readTags(
@@ -1197,9 +1709,22 @@ function readTrafficConfig(value: unknown, warnings: string[]): TrafficConfig {
     }
     return defaults;
   }
+  const preset = normalizeTrafficPreset(
+    readString(value.preset, defaults.preset, warnings, "trafficConfig.preset")
+  );
+  const defaultHour = defaultTrafficHourForPreset(preset);
+  const hour = clampTrafficHour(readNumber(value.hour, defaultHour, warnings, "trafficConfig.hour"));
+  const directionDefault = preset === "am" || preset === "pm";
+  const centralShareRaw = readNumber(
+    value.centralShare,
+    defaults.centralShare,
+    warnings,
+    "trafficConfig.centralShare"
+  );
+  const centralShare = Math.min(1, Math.max(0, centralShareRaw));
   return {
-    preset: readString(value.preset, defaults.preset, warnings, "trafficConfig.preset"),
-    hour: clampHour(readNumber(value.hour, defaults.hour, warnings, "trafficConfig.hour")),
+    preset,
+    hour,
     detail: readNumber(value.detail, defaults.detail, warnings, "trafficConfig.detail"),
     showOverlay: readBoolean(
       value.showOverlay,
@@ -1209,11 +1734,15 @@ function readTrafficConfig(value: unknown, warnings: string[]): TrafficConfig {
     ),
     showDirectionArrows: readBoolean(
       value.showDirectionArrows,
-      defaults.showDirectionArrows,
+      directionDefault,
       warnings,
       "trafficConfig.showDirectionArrows"
     ),
-    seed: readNumber(value.seed, defaults.seed, warnings, "trafficConfig.seed")
+    flowDensity: normalizeTrafficFlowDensity(
+      readString(value.flowDensity, defaults.flowDensity, warnings, "trafficConfig.flowDensity")
+    ),
+    seed: readNumber(value.seed, defaults.seed, warnings, "trafficConfig.seed"),
+    centralShare
   };
 }
 
@@ -1229,14 +1758,22 @@ function readTrafficView(
     }
     return defaults;
   }
+  const preset = normalizeTrafficPreset(
+    readString(value.preset, defaults.preset, warnings, "trafficView.preset")
+  );
+  const defaultHour = defaultTrafficHourForPreset(preset);
+  const hour = clampTrafficHour(readNumber(value.hour, defaultHour, warnings, "trafficView.hour"));
   return {
-    preset: readString(value.preset, defaults.preset, warnings, "trafficView.preset"),
-    hour: clampHour(readNumber(value.hour, defaults.hour, warnings, "trafficView.hour")),
+    preset,
+    hour,
     showDirection: readBoolean(
       value.showDirection,
       defaults.showDirection,
       warnings,
       "trafficView.showDirection"
+    ),
+    flowDensity: normalizeTrafficFlowDensity(
+      readString(value.flowDensity, defaults.flowDensity, warnings, "trafficView.flowDensity")
     )
   };
 }

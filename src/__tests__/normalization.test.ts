@@ -7,8 +7,13 @@ describe("project normalization", () => {
     const settings: AppSettings = {
       siteHeightFt: 6,
       viewerHeightFt: 6,
+      viewDistanceFt: 2000,
       topoSpacingFt: 25,
       sampleStepPx: 5,
+      frame: {
+        maxSideFt: 2640,
+        minSideFt: 300
+      },
       overlays: {
         showViewers: true,
         showCandidates: true,
@@ -31,7 +36,9 @@ describe("project normalization", () => {
       detail: 3,
       showOverlay: true,
       showDirectionArrows: false,
-      seed: 0
+      flowDensity: "medium",
+      seed: 0,
+      centralShare: 0.6
     };
 
     const road: Road = {

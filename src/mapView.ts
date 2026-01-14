@@ -14,9 +14,13 @@ export interface MapView {
   getBounds(): GeoBounds;
   getZoom(): number;
   getSize(): { width: number; height: number };
+  getLeafletMap(): any;
   getTileSourceId(): TileSourceId;
   setTileSourceId(id: TileSourceId): void;
-  setBounds(bounds: GeoBounds): void;
+  setBounds(bounds: GeoBounds, options?: { animate?: boolean; duration?: number }): void;
+  setBasemapOpacity(opacity: number): void;
+  disableInteractions(): void;
+  enableInteractions(): void;
   setLocked(locked: boolean): void;
   setLockedBounds(bounds: GeoBounds | null): void;
 }
@@ -34,15 +38,20 @@ export function createMapView(container: HTMLElement): MapView {
 
   let activeTileSourceId: TileSourceId = "street";
   const layers = new Map<TileSourceId, any>();
+  let basemapOpacity = 1;
   let lockedBoundsLayer: any | null = null;
+  const applyLayerOpacity = (layer: any) => {
+    if (layer && typeof layer.setOpacity === "function") {
+      layer.setOpacity(basemapOpacity);
+    }
+  };
   TILE_SOURCES.forEach((source) => {
-    layers.set(
-      source.id,
-      L.tileLayer(source.url, {
-        maxZoom: source.maxZoom,
-        attribution: source.attribution,
-      })
-    );
+    const layer = L.tileLayer(source.url, {
+      maxZoom: source.maxZoom,
+      attribution: source.attribution,
+    });
+    applyLayerOpacity(layer);
+    layers.set(source.id, layer);
   });
   layers.get(activeTileSourceId)?.addTo(map);
 
@@ -50,6 +59,22 @@ export function createMapView(container: HTMLElement): MapView {
     map.invalidateSize();
   });
   resizeObserver.observe(container);
+  const disableInteractions = () => {
+    map.dragging.disable();
+    map.scrollWheelZoom.disable();
+    map.doubleClickZoom.disable();
+    map.boxZoom.disable();
+    map.keyboard.disable();
+    map.touchZoom.disable();
+  };
+  const enableInteractions = () => {
+    map.dragging.enable();
+    map.scrollWheelZoom.enable();
+    map.doubleClickZoom.enable();
+    map.boxZoom.enable();
+    map.keyboard.enable();
+    map.touchZoom.enable();
+  };
 
   return {
     getBounds() {
@@ -68,6 +93,9 @@ export function createMapView(container: HTMLElement): MapView {
       const size = map.getSize();
       return { width: size.x, height: size.y };
     },
+    getLeafletMap() {
+      return map;
+    },
     getTileSourceId() {
       return activeTileSourceId;
     },
@@ -82,16 +110,24 @@ export function createMapView(container: HTMLElement): MapView {
         map.removeLayer(currentLayer);
       }
       if (nextLayer) {
+        applyLayerOpacity(nextLayer);
         nextLayer.addTo(map);
       }
       activeTileSourceId = next.id;
     },
-    setBounds(bounds: GeoBounds) {
+    setBounds(bounds: GeoBounds, options?: { animate?: boolean; duration?: number }) {
       map.fitBounds([
         [bounds.south, bounds.west],
         [bounds.north, bounds.east],
-      ]);
+      ], options);
     },
+    setBasemapOpacity(opacity: number) {
+      basemapOpacity = Math.min(1, Math.max(0, opacity));
+      const activeLayer = layers.get(activeTileSourceId);
+      applyLayerOpacity(activeLayer);
+    },
+    disableInteractions,
+    enableInteractions,
     setLockedBounds(bounds: GeoBounds | null) {
       if (!bounds) {
         if (lockedBoundsLayer) {
@@ -119,19 +155,15 @@ export function createMapView(container: HTMLElement): MapView {
     },
     setLocked(locked: boolean) {
       if (locked) {
-        map.dragging.disable();
-        map.scrollWheelZoom.disable();
-        map.doubleClickZoom.disable();
-        map.boxZoom.disable();
-        map.keyboard.disable();
-        map.touchZoom.disable();
+        disableInteractions();
+        basemapOpacity = Math.min(basemapOpacity, 0.12);
+        const activeLayer = layers.get(activeTileSourceId);
+        applyLayerOpacity(activeLayer);
       } else {
-        map.dragging.enable();
-        map.scrollWheelZoom.enable();
-        map.doubleClickZoom.enable();
-        map.boxZoom.enable();
-        map.keyboard.enable();
-        map.touchZoom.enable();
+        enableInteractions();
+        basemapOpacity = 1;
+        const activeLayer = layers.get(activeTileSourceId);
+        applyLayerOpacity(activeLayer);
       }
     },
   };

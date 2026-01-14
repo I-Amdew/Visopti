@@ -1,4 +1,4 @@
-import { GeoBounds, GeoReference } from "./types";
+import { GeoBounds, GeoProjector, GeoReference } from "./types";
 
 export interface ElevationGrid {
   rows: number;
@@ -30,9 +30,40 @@ export function createGeoReference(
   };
 }
 
-export class GeoMapper {
+export function createGeoProjector(
+  bounds: GeoBounds,
+  size: { width: number; height: number }
+): GeoProjector {
+  const width = Math.max(1, size.width);
+  const height = Math.max(1, size.height);
+  const boundsSnapshot = { ...bounds };
+  const sizeSnapshot = { width, height };
+  return {
+    bounds: boundsSnapshot,
+    size: sizeSnapshot,
+    pixelToLatLon(x: number, y: number): { lat: number; lon: number } {
+      const fy = (y + 0.5) / height;
+      const fx = (x + 0.5) / width;
+      const lat = boundsSnapshot.north - fy * (boundsSnapshot.north - boundsSnapshot.south);
+      const lon = boundsSnapshot.west + fx * (boundsSnapshot.east - boundsSnapshot.west);
+      return { lat, lon };
+    },
+    latLonToPixel(lat: number, lon: number): { x: number; y: number } {
+      const fy = (boundsSnapshot.north - lat) / (boundsSnapshot.north - boundsSnapshot.south);
+      const fx = (lon - boundsSnapshot.west) / (boundsSnapshot.east - boundsSnapshot.west);
+      return {
+        x: fx * width - 0.5,
+        y: fy * height - 0.5
+      };
+    }
+  };
+}
+
+export class GeoMapper implements GeoProjector {
   public readonly grid: ElevationGrid;
   public readonly geo: GeoReference;
+  public readonly bounds: GeoBounds;
+  public readonly size: { width: number; height: number };
   private readonly latRange: number;
   private readonly lonRange: number;
   private latCache: Float64Array | null;
@@ -41,6 +72,13 @@ export class GeoMapper {
   constructor(geo: GeoReference, grid: ElevationGrid) {
     this.geo = geo;
     this.grid = grid;
+    this.bounds = {
+      north: geo.bounds.lat_max_north,
+      south: geo.bounds.lat_min_south,
+      east: geo.bounds.lon_max_east,
+      west: geo.bounds.lon_min_west
+    };
+    this.size = { width: geo.image.width_px, height: geo.image.height_px };
     this.latRange = geo.bounds.lat_max_north - geo.bounds.lat_min_south;
     this.lonRange = geo.bounds.lon_max_east - geo.bounds.lon_min_west;
     this.latCache = null;
@@ -111,10 +149,10 @@ export class GeoMapper {
 
   latLonToElevation(lat: number, lon: number): number {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-      return 0;
+      return Number.NaN;
     }
     if (this.grid.rows === 0 || this.grid.cols === 0) {
-      return 0;
+      return Number.NaN;
     }
     const { row, col } = this.latLonToGridCoords(lat, lon);
     const r0 = Math.floor(row);
@@ -128,6 +166,9 @@ export class GeoMapper {
     const v01 = this.grid.values[r0][c1];
     const v10 = this.grid.values[r1][c0];
     const v11 = this.grid.values[r1][c1];
+    if (![v00, v01, v10, v11].every((value) => Number.isFinite(value))) {
+      return Number.NaN;
+    }
     const top = lerp(v00, v01, ct);
     const bottom = lerp(v10, v11, ct);
     return lerp(top, bottom, rt);

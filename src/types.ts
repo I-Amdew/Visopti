@@ -4,8 +4,11 @@ export type ZoneType = "obstacle" | "candidate" | "viewer";
 
 export interface ShapeBase {
   id: string;
+  name: string;
   type: ZoneType;
   alpha: number;
+  color?: string;
+  visible: boolean;
   direction?: ViewerDirection;
   viewerAnchor?: { x: number; y: number };
 }
@@ -54,6 +57,13 @@ export interface GeoBounds {
   west: number;
 }
 
+export interface GeoProjector {
+  latLonToPixel(lat: number, lon: number): { x: number; y: number };
+  pixelToLatLon(x: number, y: number): { lat: number; lon: number };
+  bounds: GeoBounds;
+  size: { width: number; height: number };
+}
+
 export interface GeoPoint {
   lat: number;
   lon: number;
@@ -61,13 +71,38 @@ export interface GeoPoint {
 
 export type MapPoint = { x: number; y: number } | GeoPoint;
 
+export interface FrameSettings {
+  maxSideFt: number;
+  minSideFt: number;
+}
+
 export interface AppSettings {
   siteHeightFt: number;
   viewerHeightFt: number;
+  viewDistanceFt: number;
   topoSpacingFt: number;
   sampleStepPx: number;
+  frame: FrameSettings;
   overlays: OverlaySettings;
   opacity: OpacitySettings;
+}
+
+export interface StructureFootprint {
+  widthFt: number;
+  lengthFt: number;
+}
+
+export interface StructureCenter {
+  x: number;
+  y: number;
+}
+
+export interface StructureParams {
+  heightFt: number;
+  footprint: StructureFootprint;
+  placeAtCenter: boolean;
+  centerPx: StructureCenter;
+  rotationDeg: number;
 }
 
 export interface ViewerSample {
@@ -76,6 +111,7 @@ export interface ViewerSample {
   lon: number;
   elevationM: number;
   direction?: ViewerDirection;
+  weight?: number;
 }
 
 export interface CandidateSample {
@@ -156,12 +192,18 @@ export interface RoadCustomTraffic {
   backward?: number | null;
 }
 
+export type TrafficFlowDensity = "low" | "medium" | "high";
+
 export interface Road {
   id: string;
   source?: RoadSource;
   points: MapPoint[];
   oneway?: RoadOneway;
   class?: RoadClass;
+  lanes?: number;
+  lanesForward?: number;
+  lanesBackward?: number;
+  lanesInferred?: boolean;
   name?: string;
   showDirectionLine?: boolean;
   directionLine?: MapPoint[];
@@ -173,7 +215,39 @@ export interface Building {
   id: string;
   footprint: MapPoint[];
   height?: number;
+  userHeightMeters?: number;
   tags?: Record<string, string>;
+}
+
+export type TreeType = "pine" | "deciduous";
+export type TreeHeightSource = "derived" | "user_override" | "ml" | "osm";
+
+export interface Tree {
+  id: string;
+  location: MapPoint;
+  type: TreeType;
+  baseRadiusMeters: number;
+  heightMeters: number;
+  heightSource: TreeHeightSource;
+}
+
+export type SignKind = "billboard" | "sign";
+export type SignHeightSource = "default" | "user_override" | "osm" | "ml";
+
+export interface Sign {
+  id: string;
+  location: MapPoint;
+  kind: SignKind;
+  widthMeters: number;
+  heightMeters: number;
+  bottomClearanceMeters: number;
+  yawDegrees: number;
+  heightSource: SignHeightSource;
+}
+
+export interface TrafficSignal {
+  id: string;
+  location: MapPoint;
 }
 
 export interface TrafficConfig {
@@ -182,7 +256,9 @@ export interface TrafficConfig {
   detail: number;
   showOverlay: boolean;
   showDirectionArrows: boolean;
+  flowDensity: TrafficFlowDensity;
   seed: number;
+  centralShare: number;
 }
 
 export interface TrafficDirectionalScores {
@@ -199,6 +275,7 @@ export interface TrafficViewState {
   preset: string;
   hour: number;
   showDirection: boolean;
+  flowDensity: TrafficFlowDensity;
 }
 
 export interface ProjectPayload {
@@ -207,9 +284,15 @@ export interface ProjectPayload {
   basemapId: TileSourceId;
   settings: AppSettings;
   shapes: Shape[];
+  structure?: StructureParams;
   autoRoads?: Road[];
   autoBuildings?: Building[];
+  autoTrees?: Tree[];
+  autoSigns?: Sign[];
+  autoTrafficSignals?: TrafficSignal[];
   customRoads?: Road[];
+  trees?: Tree[];
+  signs?: Sign[];
   trafficConfig?: TrafficConfig;
   trafficView?: TrafficViewState;
 }
@@ -219,9 +302,15 @@ export interface ProjectState {
   basemapId: TileSourceId;
   settings: AppSettings;
   shapes: Shape[];
+  structure: StructureParams;
   autoRoads: Road[];
   autoBuildings: Building[];
+  autoTrees: Tree[];
+  autoSigns: Sign[];
+  autoTrafficSignals: TrafficSignal[];
   customRoads: Road[];
+  trees: Tree[];
+  signs: Sign[];
   trafficConfig: TrafficConfig;
   trafficView: TrafficViewState;
 }

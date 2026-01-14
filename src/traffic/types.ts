@@ -38,6 +38,10 @@ export interface Road {
   points: RoadPoint[];
   oneway?: boolean | "yes" | "no" | "1" | "0" | "-1" | "true" | "false" | 1 | 0 | -1;
   class?: RoadClass;
+  lanes?: number;
+  lanesForward?: number;
+  lanesBackward?: number;
+  lanesInferred?: boolean;
 }
 
 export interface Building {
@@ -48,11 +52,17 @@ export interface Building {
   polygon?: LatLon[];
 }
 
+export interface TrafficSignal {
+  id: string;
+  location: LatLon;
+}
+
 export type TrafficPresetName = "am" | "pm" | "neutral";
 
 export interface TrafficConfig {
-  epicenter: LatLon;
-  epicenterRadiusM: number;
+  epicenter?: LatLon | null;
+  epicenterRadiusM?: number;
+  centralShare?: number;
   kRoutes?: number;
   tripCount?: number;
 }
@@ -68,6 +78,9 @@ export interface TrafficRoadScore {
 
 export interface TrafficSimResult {
   roadTraffic: Record<RoadId, TrafficRoadScore>;
+  edgeTraffic?: TrafficEdgeTraffic[];
+  viewerSamples?: TrafficViewerSample[];
+  epicenters?: TrafficEpicenter[];
   meta: {
     trips: number;
     kRoutes: number;
@@ -86,14 +99,46 @@ export interface TrafficSimProgress {
 export interface TrafficSimRequest {
   roads: Road[];
   buildings?: Building[];
-  bounds: {
+  frameBounds: {
     north: number;
     south: number;
     east: number;
     west: number;
   };
+  simBounds: {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+  };
+  trafficSignals?: TrafficSignal[];
   config: TrafficConfig;
   presets?: TrafficPresetName[];
   detailLevel?: number;
   seed?: number;
+}
+
+export interface TrafficEpicenter {
+  point: LatLon;
+  weight: number;
+  direction?: "north" | "south" | "east" | "west";
+}
+
+export interface TrafficEdgeTraffic {
+  edgeId: string;
+  roadId: RoadId;
+  from: LatLon;
+  to: LatLon;
+  lengthM: number;
+  flow: number;
+  dwellFactor: number;
+  speedMps?: number;
+}
+
+export interface TrafficViewerSample {
+  lat: number;
+  lon: number;
+  heading: number;
+  weight: number;
+  speedMps?: number;
 }

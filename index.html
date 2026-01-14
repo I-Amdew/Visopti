@@ -17,232 +17,585 @@
     <div id="app">
       <div id="workspace" class="is-unlocked">
         <div id="mapView" class="stage-layer"></div>
+        <div id="threeView" class="stage-layer" aria-hidden="true"></div>
         <canvas id="mainCanvas" class="stage-layer" width="800" height="600"></canvas>
-        <form id="addressForm" class="address-bar" role="search">
-          <input
-            id="addressInput"
-            type="search"
-            name="address"
-            placeholder="Search address or place"
-            aria-label="Search address"
-            autocomplete="street-address"
-            enterkeyhint="search"
-          />
-          <button id="addressGo" type="submit">Go</button>
-        </form>
         <div id="mapStatus" class="map-status">Frame unlocked: pan/zoom to set a new reference.</div>
         <div id="statusOverlay">Loading…</div>
+        <div id="threeViewFallback" class="three-fallback hidden"></div>
+        <div
+          id="structurePreviewWidget"
+          role="button"
+          tabindex="0"
+          aria-label="Open structure editor"
+        >
+          <canvas id="structurePreviewCanvas" width="200" height="200"></canvas>
+        </div>
       </div>
       
       <section id="controls">
-        <h2>Map & Terrain</h2>
-        <p class="hint">
-          Pan/zoom the map to set your frame, lock it, then load topography to sync the canvas.
-        </p>
-        <label>Basemap
-          <select id="basemapStyle">
-            <option value="street">Street</option>
-            <option value="satellite">Satellite</option>
-            <option value="autoStreet">Auto street</option>
-          </select>
-        </label>
-        <div id="basemapWarning" class="status-line hidden"></div>
-        <div class="control-buttons">
-          <button id="btnLockFrame" class="primary">Lock frame</button>
-          <button id="btnLoadTopography">Load topography</button>
-        </div>
-
-        <h2>Tools</h2>
-        <div id="toolButtons" class="button-grid">
-          <button data-tool="select" class="active">Select</button>
-          <button data-tool="erase">Erase</button>
-          <button data-tool="drawViewerPolygon">Viewer Poly</button>
-          <button data-tool="drawCandidatePolygon">Candidate Poly</button>
-          <button data-tool="drawObstaclePolygon">Obstacle Poly</button>
-          <button data-tool="drawObstacleEllipse">Obstacle Ellipse</button>
-        </div>
-
-        <h2>Settings</h2>
-        <label>Target height (ft)
-          <input id="siteHeight" type="number" value="6" min="1" />
-        </label>
-        <label>Viewer height (ft)
-          <input id="viewerHeight" type="number" value="6" min="1" />
-        </label>
-        <label>Topography sample spacing (ft)
-          <input id="topoSpacing" type="number" value="25" min="5" step="1" />
-        </label>
-        <label>Sample step (px)
-          <input id="sampleStep" type="number" value="5" min="1" />
-        </label>
-
-        <h3>Overlay visibility</h3>
-        <label class="checkbox-row">
-          <input id="toggleViewers" type="checkbox" checked />
-          Show viewer zones
-        </label>
-        <label class="checkbox-row">
-          <input id="toggleCandidates" type="checkbox" checked />
-          Show candidate zones
-        </label>
-        <label class="checkbox-row">
-          <input id="toggleObstacles" type="checkbox" checked />
-          Show obstacle zones
-        </label>
-        <label class="checkbox-row">
-          <input id="toggleContours" type="checkbox" />
-          Topography contours
-        </label>
-
-        <h3>Opacity</h3>
-        <label>Viewer opacity
-          <input id="viewerOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
-        </label>
-        <label>Candidate opacity
-          <input id="candidateOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
-        </label>
-        <label>Obstacle opacity
-          <input id="obstacleOpacity" type="range" min="0" max="1" step="0.05" value="0.85" />
-        </label>
-        <label>Heatmap opacity
-          <input id="heatmapOpacity" type="range" min="0" max="1" step="0.05" value="0.45" />
-        </label>
-        <label>Shading opacity
-          <input id="shadingOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
-        </label>
-        <label>Contour opacity
-          <input id="contourOpacity" type="range" min="0" max="1" step="0.05" value="0.9" />
-        </label>
-
-        <div class="control-buttons">
-          <button id="btnComputeHeatmap" class="primary">Compute heatmap</button>
-          <button id="btnComputeShading">Compute blindspots</button>
-          <button id="btnClearHeatmap">Clear heatmap</button>
-          <button id="btnClearShading">Clear blindspots</button>
-          <button id="btnClearShapes">Clear shapes</button>
-        </div>
-
-        <div id="progressContainer" class="hidden">
-          <div id="progressLabel">Computing…</div>
-          <progress id="computeProgress" max="1" value="0"></progress>
-        </div>
-
-        <h2>Project</h2>
-        <button id="btnExportProject">Export project JSON</button>
-        <label class="import-label">Import project JSON
-          <input id="importFile" type="file" accept="application/json" />
-        </label>
-        <button id="btnExportShapes">Export shapes JSON</button>
-        <label class="import-label">Import shapes JSON
-          <input id="importShapesFile" type="file" accept="application/json" />
-        </label>
-
-        <details class="advanced-section" open>
-          <summary>Roads &amp; Traffic</summary>
-          <div class="details-body">
-            <h3>Mode</h3>
-            <div class="toggle-group">
-              <label class="toggle-option">
-                <input id="modeAuto" type="radio" name="roadMode" value="auto" checked />
-                Auto mode
-              </label>
-              <label class="toggle-option">
-                <input id="modeCustom" type="radio" name="roadMode" value="custom" />
-                Custom mode
-              </label>
-            </div>
-
-            <h3>Auto data</h3>
+        <h2>Workflow Steps</h2>
+        <ol class="workflow-steps">
+          <li class="workflow-step" data-step="location">
+            <h3>1) Location</h3>
+            <form id="addressForm" class="address-bar" role="search">
+              <input
+                id="addressInput"
+                type="search"
+                name="address"
+                placeholder="Search address or place"
+                aria-label="Search address"
+                autocomplete="street-address"
+                enterkeyhint="search"
+              />
+              <button id="addressGo" type="submit">Search</button>
+            </form>
+            <button id="btnUseMapCenter" type="button" class="link-button">
+              Use current map center
+            </button>
+          </li>
+          <li class="workflow-step" data-step="frame">
+            <h3>2) Frame</h3>
             <div class="control-buttons">
-              <button id="btnAutoPopulate" class="primary">Auto-populate roads/buildings</button>
-              <button id="btnRefreshAuto">Refresh auto data</button>
+              <button id="btnSetFrame" class="primary" type="button">Set frame</button>
+              <button id="btnResetFrame" type="button">Reset frame</button>
             </div>
-            <div id="autoDataStatus" class="status-line">No auto data yet.</div>
-
-            <h3>Epicenter</h3>
+            <div class="frame-readout">
+              <div class="value-row">
+                <span>Width</span>
+                <span id="frameWidthValue">--</span>
+              </div>
+              <div class="value-row">
+                <span>Height</span>
+                <span id="frameHeightValue">--</span>
+              </div>
+              <div class="value-row">
+                <span>Approx area</span>
+                <span id="frameAreaValue">--</span>
+              </div>
+              <div id="frameStatus" class="status-line">No draft frame yet.</div>
+            </div>
+          </li>
+          <li class="workflow-step" data-step="lock">
+            <h3>3) Lock</h3>
             <div class="control-buttons">
-              <button id="btnPickEpicenter">Set epicenter by click</button>
+              <button id="btnLockFrame" class="primary" type="button">Lock frame</button>
+              <button id="btnUnlockFrame" type="button" disabled>Edit frame</button>
             </div>
-            <label>Radius (m)
-              <input id="epicenterRadius" type="range" min="50" max="5000" step="50" value="800" />
-            </label>
-            <div class="value-row">
-              <span id="epicenterRadiusValue">800 m</span>
-              <span id="epicenterStatus">No epicenter set</span>
-            </div>
-
-            <h3>Traffic</h3>
-            <label>Traffic preset
-              <select id="trafficPreset">
-                <option value="am">AM</option>
-                <option value="pm">PM</option>
-                <option value="neutral" selected>Neutral</option>
-                <option value="hourly">Hourly</option>
-              </select>
-            </label>
-            <label id="trafficHourRow" class="hidden">Hour
-              <input id="trafficHour" type="range" min="0" max="23" step="1" value="8" />
-            </label>
-            <div id="trafficHourValue" class="value-row hidden">08:00</div>
-            <label>Detail level
-              <input id="trafficDetail" type="range" min="1" max="5" step="1" value="3" />
-            </label>
-            <div id="trafficDetailValue" class="value-row">Detail 3</div>
+            <p class="hint">Terrain loads automatically after lock.</p>
             <div class="control-buttons">
-              <button id="btnComputeTraffic" class="primary">Compute traffic</button>
+              <button id="btnLoadTopography" type="button">Load terrain (optional)</button>
             </div>
-            <label class="checkbox-row">
-              <input id="toggleTrafficOverlay" type="checkbox" checked />
-              Show traffic overlay
-            </label>
-            <label class="checkbox-row">
-              <input id="toggleDirectionArrows" type="checkbox" />
-              Show direction arrows
-            </label>
-        <div id="trafficProgress" class="progress-row hidden">
-          <div class="progress-header">
-            <div id="trafficProgressLabel">Simulating…</div>
-            <button id="btnCancelTraffic" type="button">Cancel</button>
-          </div>
-          <progress id="trafficProgressBar" max="1" value="0"></progress>
-        </div>
+          </li>
+          <li class="workflow-step" data-step="traffic">
+            <h3>4) Traffic</h3>
+            <div class="control-buttons">
+              <button id="btnComputeTraffic" class="primary" type="button">
+                Compute simulated traffic
+              </button>
+              <button id="btnRecomputeTraffic" type="button" disabled>Recompute traffic</button>
+            </div>
+            <div id="trafficProgress" class="progress-row hidden">
+              <div class="progress-header">
+                <div id="trafficProgressLabel">Simulating…</div>
+                <button id="btnCancelTraffic" type="button">Cancel</button>
+              </div>
+              <progress id="trafficProgressBar" max="1" value="0"></progress>
+            </div>
             <div id="trafficStatus" class="status-line hidden"></div>
-
-            <h3>Road tools</h3>
-            <div class="control-buttons">
-              <button id="btnAddRoad">Add custom road</button>
-              <button id="btnEditRoad">Edit selected road</button>
-              <button id="btnDeleteRoad">Delete selected road</button>
-            </div>
-            <div id="roadProperties" class="panel hidden">
-              <label>Name (optional)
-                <input id="roadName" type="text" placeholder="Road name" />
-              </label>
-              <label>One-way
-                <select id="roadDirection">
-                  <option value="both">Both</option>
-                  <option value="forward">Forward</option>
-                  <option value="backward">Backward</option>
+            <div class="panel">
+              <label>Traffic profile
+                <select id="trafficPreset">
+                  <option value="neutral" selected>Standard</option>
+                  <option value="am">Morning Rush</option>
+                  <option value="pm">Afternoon Rush</option>
                 </select>
               </label>
+              <label id="trafficHourRow">Representative time
+                <input id="trafficHour" type="range" min="6" max="20" step="1" value="12" />
+              </label>
+              <div id="trafficHourValue" class="value-row">12:00</div>
+              <div id="trafficWindowHint" class="value-row hidden"></div>
+              <label>Detail level
+                <input id="trafficDetail" type="range" min="1" max="5" step="1" value="3" />
+              </label>
+              <div id="trafficDetailValue" class="value-row">Detail 3</div>
               <label class="checkbox-row">
-                <input id="roadShowCenterline" type="checkbox" />
-                Show direction line
+                <input id="toggleTrafficOverlay" type="checkbox" checked />
+                Show traffic overlay
               </label>
-              <label>Cars/hour forward
-                <input id="roadCarsForward" type="number" min="0" step="50" />
+              <label class="checkbox-row">
+                <input id="toggleDirectionArrows" type="checkbox" />
+                Show direction arrows
               </label>
-              <label>Cars/hour backward
-                <input id="roadCarsBackward" type="number" min="0" step="50" />
+              <label>Flow density
+                <select id="trafficFlowDensity">
+                  <option value="low">Low</option>
+                  <option value="medium" selected>Med</option>
+                  <option value="high">High</option>
+                </select>
               </label>
-              <p class="hint">Custom roads only.</p>
             </div>
+          </li>
+          <li class="workflow-step" data-step="structure">
+            <h3>5) Structure</h3>
+            <div class="panel">
+              <label>Structure height (ft)
+                <input id="structureHeight" type="number" value="30" min="1" step="1" />
+              </label>
+              <label>Footprint width (ft)
+                <input id="structureWidth" type="number" value="60" min="1" step="1" />
+              </label>
+              <label>Footprint length (ft)
+                <input id="structureLength" type="number" value="90" min="1" step="1" />
+              </label>
+              <label class="checkbox-row">
+                <input id="structureCentered" type="checkbox" checked />
+                Place at frame center
+              </label>
+            </div>
+            <div class="panel structure-analysis">
+              <div class="control-buttons">
+                <button id="btnOptimizeStructure" class="primary" type="button">
+                  Optimize placement
+                </button>
+              </div>
+              <label class="checkbox-row">
+                <input id="structureSquareToRoad" type="checkbox" />
+                Square to road
+              </label>
+              <label>Prioritize face
+                <select id="structureFacePriority">
+                  <option value="">None</option>
+                </select>
+              </label>
+              <div class="value-row">
+                <span>Best score</span>
+                <span id="structureBestScore">--</span>
+              </div>
+              <div class="value-row">
+                <span>Best rotation</span>
+                <span id="structureBestRotation">--</span>
+              </div>
+              <div id="structureFaceScores" class="structure-face-scores">
+                <div class="hint">Run optimization to see face ranking.</div>
+              </div>
+            </div>
+          </li>
+          <li class="workflow-step" data-step="candidates">
+            <h3>6) Candidate regions</h3>
+            <div class="panel">
+              <div id="toolButtons" class="button-grid">
+                <button data-tool="select" class="active">Select</button>
+                <button data-tool="erase">Erase</button>
+                <button data-tool="drawViewerPolygon">Viewer Poly</button>
+                <button data-tool="drawCandidatePolygon">Candidate Poly</button>
+                <button data-tool="drawObstaclePolygon">Obstacle Poly</button>
+                <button data-tool="drawObstacleEllipse">Obstacle Ellipse</button>
+              </div>
+            </div>
+            <div id="candidateList" class="panel">
+              <button id="btnAddCandidate" class="primary">Add candidate polygon</button>
+              <div class="value-row">
+                <span>Candidate regions</span>
+                <span id="candidateCount">0</span>
+              </div>
+              <div id="candidateItems" class="candidate-items">
+                <div class="hint">No candidate regions yet.</div>
+              </div>
+            </div>
+          </li>
+        </ol>
+
+        <div id="lockedInspectPanel" class="panel locked-only">
+          <h3>View</h3>
+          <div class="panel view-toggle-panel">
+            <label class="checkbox-row">
+              <input id="toggle3dView" type="checkbox" />
+              3D View
+            </label>
+            <button id="btnReturn2d" type="button" class="hidden">Return to 2D</button>
+          </div>
+          <h3>Layers</h3>
+          <div class="layer-grid">
+            <label class="checkbox-row">
+              <input id="layerRoads" type="checkbox" checked />
+              Roads
+            </label>
+            <label class="checkbox-row">
+              <input id="layerBuildings" type="checkbox" checked />
+              Buildings
+            </label>
+            <label class="checkbox-row">
+              <input id="layerTrees" type="checkbox" checked />
+              Trees
+            </label>
+            <label class="checkbox-row">
+              <input id="layerSigns" type="checkbox" checked />
+              Signs
+            </label>
+            <label class="checkbox-row">
+              <input id="layerCandidates" type="checkbox" checked />
+              Candidates
+            </label>
+            <label class="checkbox-row">
+              <input id="layerTraffic" type="checkbox" checked />
+              Traffic
+            </label>
+          </div>
+          <h3>Obstacles</h3>
+          <div class="panel obstacle-panel">
+            <div id="obstacleToolButtons" class="button-grid">
+              <button id="btnAddTreeDeciduous" type="button">Add Tree (Deciduous)</button>
+              <button id="btnAddTreePine" type="button">Add Tree (Pine)</button>
+              <button id="btnAddSign" type="button">Add Billboard/Sign</button>
+            </div>
+            <label class="checkbox-row">
+              <input id="toggleInspectMode" type="checkbox" />
+              Inspect/Select
+            </label>
+          </div>
+          <div class="panel inspect-panel">
+            <div id="inspectEmpty" class="hint">Click a feature to inspect.</div>
+            <div id="inspectGenericDetails" class="hidden">
+              <div class="value-row">
+                <span>Selected</span>
+                <span id="inspectFeatureLabel">--</span>
+              </div>
+            </div>
+            <div id="inspectBuildingDetails" class="hidden">
+              <div class="value-row">
+                <span>Building</span>
+                <span id="inspectBuildingId">--</span>
+              </div>
+              <div class="value-row">
+                <span>Inferred height</span>
+                <span id="inspectInferredHeight">--</span>
+              </div>
+              <div class="value-row">
+                <span>Source</span>
+                <span id="inspectHeightSource">--</span>
+              </div>
+              <label>Override height (m)
+                <input id="inspectHeightMeters" type="number" min="0" step="0.1" />
+              </label>
+              <label>Override height (ft)
+                <input id="inspectHeightFeet" type="number" min="0" step="0.1" />
+              </label>
+              <button id="inspectResetHeight" type="button">Reset to inferred</button>
+            </div>
+            <div id="inspectTreeDetails" class="hidden">
+              <div class="value-row">
+                <span>Tree</span>
+                <span id="inspectTreeId">--</span>
+              </div>
+              <label>Type
+                <select id="inspectTreeType">
+                  <option value="deciduous">Deciduous</option>
+                  <option value="pine">Pine</option>
+                </select>
+              </label>
+              <label>Base radius (m)
+                <input id="inspectTreeRadius" type="number" min="0" step="0.1" />
+              </label>
+              <div class="value-row">
+                <span>Derived height</span>
+                <span id="inspectTreeDerivedHeight">--</span>
+              </div>
+              <label>Override height (m)
+                <input id="inspectTreeHeightMeters" type="number" min="0" step="0.1" />
+              </label>
+              <label>Override height (ft)
+                <input id="inspectTreeHeightFeet" type="number" min="0" step="0.1" />
+              </label>
+              <button id="inspectTreeResetHeight" type="button">Reset to derived</button>
+            </div>
+            <div id="inspectSignDetails" class="hidden">
+              <div class="value-row">
+                <span>Sign</span>
+                <span id="inspectSignId">--</span>
+              </div>
+              <label>Kind
+                <select id="inspectSignKind">
+                  <option value="sign">Sign</option>
+                  <option value="billboard">Billboard</option>
+                </select>
+              </label>
+              <label>Width (m)
+                <input id="inspectSignWidth" type="number" min="0" step="0.1" />
+              </label>
+              <label>Height (m)
+                <input id="inspectSignHeight" type="number" min="0" step="0.1" />
+              </label>
+              <label>Bottom clearance (m)
+                <input id="inspectSignClearance" type="number" min="0" step="0.1" />
+              </label>
+              <label>Yaw (deg)
+                <input id="inspectSignYaw" type="number" step="1" />
+              </label>
+              <button id="inspectSignResetHeight" type="button">Reset height to default</button>
+            </div>
+          </div>
+        </div>
+
+        <details class="advanced-section" id="advancedPanel">
+          <summary>Advanced</summary>
+          <div class="details-body">
+            <h2>Map &amp; Terrain</h2>
+            <label>Basemap
+              <select id="basemapStyle">
+                <option value="street">Street</option>
+                <option value="satellite">Satellite</option>
+                <option value="autoStreet">Auto street</option>
+              </select>
+            </label>
+            <label class="checkbox-row">
+              <input id="toggleImageryBackground" type="checkbox" />
+              Show imagery background
+            </label>
+            <div id="basemapWarning" class="status-line hidden"></div>
+
+            <h2>Analysis</h2>
+            <label>Target height (ft)
+              <input id="siteHeight" type="number" value="6" min="1" />
+            </label>
+            <label>Viewer height (ft)
+              <input id="viewerHeight" type="number" value="6" min="1" />
+            </label>
+            <label>View distance (ft)
+              <input id="viewDistance" type="number" value="2000" min="0" step="50" />
+            </label>
+            <label>Topography sample spacing (ft)
+              <input id="topoSpacing" type="number" value="25" min="5" step="1" />
+            </label>
+            <label>Sample step (px)
+              <input id="sampleStep" type="number" value="5" min="1" />
+            </label>
+
+            <h3>Opacity</h3>
+            <label>Viewer opacity
+              <input id="viewerOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
+            </label>
+            <label>Candidate opacity
+              <input id="candidateOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
+            </label>
+            <label>Obstacle opacity
+              <input id="obstacleOpacity" type="range" min="0" max="1" step="0.05" value="0.85" />
+            </label>
+            <label>Heatmap opacity
+              <input id="heatmapOpacity" type="range" min="0" max="1" step="0.05" value="0.45" />
+            </label>
+            <label>Shading opacity
+              <input id="shadingOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
+            </label>
+            <label>Contour opacity
+              <input id="contourOpacity" type="range" min="0" max="1" step="0.05" value="0.9" />
+            </label>
+
+            <div class="control-buttons">
+              <button id="btnComputeHeatmap" class="primary">Run analysis</button>
+              <button id="btnComputeShading">Compute blindspots</button>
+              <button id="btnClearHeatmap">Clear heatmap</button>
+              <button id="btnClearShading">Clear blindspots</button>
+              <button id="btnClearShapes">Clear shapes</button>
+            </div>
+
+            <div id="progressContainer" class="hidden">
+              <div id="progressLabel">Computing…</div>
+              <progress id="computeProgress" max="1" value="0"></progress>
+            </div>
+
+            <details class="advanced-section">
+              <summary>Roads &amp; Traffic</summary>
+              <div class="details-body">
+                <h3>Mode</h3>
+                <div class="toggle-group">
+                  <label class="toggle-option">
+                    <input id="modeAuto" type="radio" name="roadMode" value="auto" checked />
+                    Auto mode
+                  </label>
+                  <label class="toggle-option">
+                    <input id="modeCustom" type="radio" name="roadMode" value="custom" />
+                    Custom mode
+                  </label>
+                </div>
+
+                <h3>Auto data</h3>
+                <div class="control-buttons">
+                  <button id="btnAutoPopulate" class="primary">Auto-populate roads/buildings</button>
+                  <button id="btnRefreshAuto">Refresh auto data</button>
+                </div>
+                <div id="autoDataStatus" class="status-line">No auto data yet.</div>
+                <div id="simulationExtentStatus" class="status-line">Simulation extent: --</div>
+                <label class="checkbox-row">
+                  <input id="toggleFetchOsmObstacles" type="checkbox" />
+                  Fetch OSM obstacles (trees, billboards, signals)
+                </label>
+
+                <h3>Epicenter</h3>
+                <div class="control-buttons">
+                  <button id="btnPickEpicenter">Set epicenter by click</button>
+                </div>
+                <label>Radius (m)
+                  <input id="epicenterRadius" type="range" min="50" max="5000" step="50" value="800" />
+                </label>
+                <div class="value-row">
+                  <span id="epicenterRadiusValue">800 m</span>
+                  <span id="epicenterStatus">No epicenter set</span>
+                </div>
+                <label>Centralized share (0-1)
+                  <input id="trafficCentralShare" type="number" min="0" max="1" step="0.05" value="0.6" />
+                </label>
+                <p class="hint">Share of trips biased toward epicenters.</p>
+
+                <h3>Road tools</h3>
+                <div id="customRoadControls" class="control-buttons">
+                  <button id="btnAddRoad">Add custom road</button>
+                  <button id="btnEditRoad">Edit selected road</button>
+                  <button id="btnDeleteRoad">Delete selected road</button>
+                </div>
+                <p id="customRoadHint" class="hint">Custom mode required for add/edit/delete.</p>
+                <div id="roadProperties" class="panel hidden">
+                  <label>Name (optional)
+                    <input id="roadName" type="text" placeholder="Road name" />
+                  </label>
+                  <label>One-way
+                    <select id="roadDirection">
+                      <option value="both">Both</option>
+                      <option value="forward">Forward</option>
+                      <option value="backward">Backward</option>
+                    </select>
+                  </label>
+                  <label class="checkbox-row">
+                    <input id="roadShowCenterline" type="checkbox" />
+                    Show direction line
+                  </label>
+                  <label>Cars/hour forward
+                    <input id="roadCarsForward" type="number" min="0" step="50" />
+                  </label>
+                  <label>Cars/hour backward
+                    <input id="roadCarsBackward" type="number" min="0" step="50" />
+                  </label>
+                  <p class="hint">Custom traffic fields apply to custom roads.</p>
+                </div>
+              </div>
+            </details>
+          </div>
+        </details>
+
+        <details class="advanced-section" id="debugPanel">
+          <summary>Debug</summary>
+          <div class="details-body">
+            <h2>Diagnostics</h2>
+            <div id="debugStats" class="status-line">Mode: --</div>
+            <label class="checkbox-row">
+              <input id="toggleViewers" type="checkbox" checked />
+              Show viewer zones
+            </label>
+            <label class="checkbox-row">
+              <input id="toggleCandidates" type="checkbox" checked />
+              Show candidate zones
+            </label>
+            <label class="checkbox-row">
+              <input id="toggleObstacles" type="checkbox" checked />
+              Show obstacle zones
+            </label>
+            <label class="checkbox-row">
+              <input id="toggleContours" type="checkbox" />
+              Topography contours
+            </label>
+
+            <h2>Export &amp; Import</h2>
+            <button id="btnExportProject">Export project JSON</button>
+            <label class="import-label">Import project JSON
+              <input id="importFile" type="file" accept="application/json" />
+            </label>
+            <button id="btnExportShapes">Export shapes JSON</button>
+            <label class="import-label">Import shapes JSON
+              <input id="importShapesFile" type="file" accept="application/json" />
+            </label>
+
+            <h2>ML Labeling</h2>
+            <label class="checkbox-row">
+              <input id="toggleLabelingMode" type="checkbox" />
+              Labeling mode
+            </label>
+            <div id="labelToolButtons" class="button-grid">
+              <button type="button" data-tool="labelTreeDeciduous">Label Tree (Deciduous)</button>
+              <button type="button" data-tool="labelTreePine">Label Tree (Pine)</button>
+              <button type="button" data-tool="labelSign">Label Sign</button>
+              <button type="button" data-tool="labelBillboard">Label Billboard</button>
+            </div>
+            <div class="control-buttons">
+              <button id="btnExportLabels" type="button">Export labels JSON</button>
+              <label class="import-label">Import predictions JSON
+                <input id="importPredictionsFile" type="file" accept="application/json" />
+              </label>
+              <button id="btnClearPredictions" type="button">Clear predictions</button>
+            </div>
+            <div id="labelStatus" class="status-line">Labels: 0 · Predictions: 0</div>
           </div>
         </details>
 
         <div id="warningBanner" class="hidden"></div>
         <div id="statusMessage"></div>
       </section>
+    </div>
+
+    <div
+      id="structureEditorModal"
+      class="structure-editor-modal hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-hidden="true"
+      aria-labelledby="structureEditorTitle"
+    >
+      <div class="structure-editor-shell" role="document">
+        <header class="structure-editor-header">
+          <div>
+            <h2 id="structureEditorTitle">Structure Editor</h2>
+            <p class="hint">
+              Drag corners to resize, drag inside to move, drag the top handle to rotate.
+            </p>
+          </div>
+          <button id="structureEditorClose" type="button" class="link-button">
+            Close
+          </button>
+        </header>
+        <div class="structure-editor-body">
+          <div class="structure-editor-stage">
+            <canvas id="structureEditorCanvas" width="900" height="640"></canvas>
+            <div class="structure-editor-note">Shift snaps rotation to 15 deg.</div>
+          </div>
+          <aside class="structure-editor-panel panel">
+            <h3>Footprint</h3>
+            <label>Width (ft)
+              <input id="structureEditorWidth" type="number" min="1" step="1" />
+            </label>
+            <label>Length (ft)
+              <input id="structureEditorLength" type="number" min="1" step="1" />
+            </label>
+            <label>Rotation (deg)
+              <input id="structureEditorRotation" type="number" step="1" />
+            </label>
+            <div class="value-row">
+              <span>Width</span>
+              <span id="structureEditorWidthValue">--</span>
+            </div>
+            <div class="value-row">
+              <span>Length</span>
+              <span id="structureEditorLengthValue">--</span>
+            </div>
+            <div class="value-row">
+              <span>Area</span>
+              <span id="structureEditorAreaValue">--</span>
+            </div>
+            <div class="structure-editor-actions">
+              <button id="structureEditorCancel" type="button">Cancel</button>
+              <button id="structureEditorApply" type="button" class="primary">Apply</button>
+            </div>
+          </aside>
+        </div>
+      </div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

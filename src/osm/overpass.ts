@@ -1,5 +1,7 @@
 import { GeoBounds } from "../types";
-import { Building, LatLon, Road, RoadClass, RoadDirection } from "./types";
+import { inferLanesByClass, parseLaneTag } from "../traffic/lanes";
+import { Building, LatLon, Road, RoadClass, RoadDirection, Sign, TrafficSignal, Tree } from "./types";
+import { DEFAULT_TREE_RADIUS_METERS } from "../obstacles";
 
 export const OVERPASS_DEFAULT_ENDPOINT = "https://overpass-api.de/api/interpreter";
 
@@ -10,19 +12,25 @@ const OVERPASS_FALLBACK_ENDPOINTS = [
 ];
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const CACHE_TYPES_KEY = "roads,buildings";
+const CACHE_TYPES_BASE = "roads";
 const SHOW_DIRECTION_DEFAULT = true; // Default for new OSM roads.
 const MAX_RETRIES = 2;
 const RETRY_BASE_MS = 600;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_OSM_TREES = 1500;
 
 type OverpassTags = Record<string, string>;
+
+export type RoadClassFilter = "all" | "major";
+
+const MAJOR_ROAD_REGEX = "^(motorway|trunk|primary|secondary)(_link)?$";
 
 export interface OverpassNode {
   type: "node";
   id: number;
   lat: number;
   lon: number;
+  tags?: OverpassTags;
 }
 
 export interface OverpassWay {
@@ -43,6 +51,9 @@ export interface OsmFetchMeta {
   counts: {
     roads: number;
     buildings: number;
+    trees: number;
+    signs: number;
+    trafficSignals: number;
     nodes: number;
     ways: number;
   };
@@ -52,6 +63,9 @@ export interface OsmFetchMeta {
 export interface OsmFetchResult {
   roads: Road[];
   buildings: Building[];
+  trees: Tree[];
+  signs: Sign[];
+  trafficSignals: TrafficSignal[];
   meta: OsmFetchMeta;
 }
 
@@ -64,34 +78,69 @@ const cache = new Map<string, CacheEntry>();
 
 export async function fetchOsmRoadsAndBuildings(
   bounds: GeoBounds,
-  opts: { endpoint?: string; signal?: AbortSignal } = {}
+  opts: {
+    endpoint?: string;
+    signal?: AbortSignal;
+    includeObstacles?: boolean;
+    includeBuildings?: boolean;
+    includeTrafficSignals?: boolean;
+    roadClassFilter?: RoadClassFilter;
+  } = {}
 ): Promise<OsmFetchResult> {
   const endpointInput = (opts.endpoint ?? "").trim();
   const endpoints = endpointInput ? [endpointInput] : OVERPASS_FALLBACK_ENDPOINTS;
   const endpointKey = endpointInput || "auto";
   const normalizedBounds = normalizeBounds(bounds);
-  const cacheKey = buildCacheKey(endpointKey, normalizedBounds);
+  const includeObstacles = opts.includeObstacles === true;
+  const includeBuildings = opts.includeBuildings !== false;
+  const includeTrafficSignals = opts.includeTrafficSignals === true || includeObstacles;
+  const roadClassFilter = opts.roadClassFilter ?? "all";
+  const cacheKey = buildCacheKey(endpointKey, normalizedBounds, {
+    includeObstacles,
+    includeBuildings,
+    includeTrafficSignals,
+    roadClassFilter
+  });
   const cached = readCache(cacheKey);
   if (cached) {
     return cached;
   }
 
-  const query = buildOverpassQuery(normalizedBounds);
+  const query = buildOverpassQuery(normalizedBounds, {
+    includeObstacles,
+    includeBuildings,
+    includeTrafficSignals,
+    roadClassFilter
+  });
   const promise = (async () => {
     let lastError: Error | null = null;
     for (const endpoint of endpoints) {
       try {
         const payload = await requestOverpass(endpoint, query, opts.signal);
-        const { roads, buildings, nodeCount, wayCount } = parseOverpassPayload(payload);
+        const {
+          roads,
+          buildings,
+          trees,
+          signs,
+          trafficSignals,
+          nodeCount,
+          wayCount,
+        } = parseOverpassPayload(payload);
         return {
           roads,
           buildings,
+          trees,
+          signs,
+          trafficSignals,
           meta: {
             fetchedAtIso: new Date().toISOString(),
             bbox: normalizedBounds,
             counts: {
               roads: roads.length,
               buildings: buildings.length,
+              trees: trees.length,
+              signs: signs.length,
+              trafficSignals: trafficSignals.length,
               nodes: nodeCount,
               ways: wayCount,
             },
@@ -112,12 +161,37 @@ export async function fetchOsmRoadsAndBuildings(
   return promise;
 }
 
-function buildOverpassQuery(bounds: GeoBounds): string {
+function buildOverpassQuery(
+  bounds: GeoBounds,
+  options: {
+    includeObstacles: boolean;
+    includeBuildings: boolean;
+    includeTrafficSignals: boolean;
+    roadClassFilter: RoadClassFilter;
+  }
+): string {
   const bbox = formatBounds(bounds);
+  const roadQuery =
+    options.roadClassFilter === "major"
+      ? `  way["highway"~"${MAJOR_ROAD_REGEX}"](${bbox});`
+      : `  way["highway"](${bbox});`;
+  const buildingQuery = options.includeBuildings ? `  way["building"](${bbox});` : "";
+  const signalQuery = options.includeTrafficSignals
+    ? `  node["highway"="traffic_signals"](${bbox});`
+    : "";
+  const obstacleQuery = options.includeObstacles
+    ? `
+  node["advertising"="billboard"](${bbox});
+  way["advertising"="billboard"](${bbox});
+  node["natural"="tree"](${bbox});
+`
+    : "";
   return `[out:json][timeout:25];
 (
-  way["highway"](${bbox});
-  way["building"](${bbox});
+${roadQuery}
+${buildingQuery}
+${signalQuery}
+${obstacleQuery}
 );
 (._;>;);
 out body;`;
@@ -126,6 +200,9 @@ out body;`;
 export function parseOverpassPayload(payload: OverpassResponse): {
   roads: Road[];
   buildings: Building[];
+  trees: Tree[];
+  signs: Sign[];
+  trafficSignals: TrafficSignal[];
   nodeCount: number;
   wayCount: number;
 } {
@@ -136,6 +213,9 @@ export function parseOverpassPayload(payload: OverpassResponse): {
 
   const nodeIndex = new Map<number, LatLon>();
   const ways: OverpassWay[] = [];
+  const trees: Tree[] = [];
+  const signs: Sign[] = [];
+  const trafficSignals: TrafficSignal[] = [];
 
   for (const element of payload.elements) {
     if (!element || typeof element !== "object") {
@@ -152,6 +232,31 @@ export function parseOverpassPayload(payload: OverpassResponse): {
         continue;
       }
       nodeIndex.set(node.id, { lat, lon });
+      const tags = node.tags ?? {};
+      if (tags.highway === "traffic_signals") {
+        trafficSignals.push({ id: `osm:node:${node.id}`, location: { lat, lon } });
+      }
+      if (tags.advertising === "billboard") {
+        signs.push({
+          id: `osm:node:${node.id}`,
+          location: { lat, lon },
+          kind: "billboard",
+          widthMeters: parseHeightValue(tags.width),
+          heightMeters: parseHeightValue(tags.height),
+          bottomClearanceMeters: parseHeightValue(tags.min_height)
+        });
+      }
+      if (tags.natural === "tree") {
+        const baseRadius =
+          parseTreeRadiusMeters(tags) ?? DEFAULT_TREE_RADIUS_METERS;
+        trees.push({
+          id: `osm:node:${node.id}`,
+          location: { lat, lon },
+          type: mapTreeType(tags),
+          baseRadiusMeters: baseRadius,
+          heightMeters: parseHeightValue(tags.height)
+        });
+      }
     } else if (element.type === "way") {
       const way = element as OverpassWay;
       if (!Array.isArray(way.nodes) || way.nodes.length === 0) {
@@ -168,7 +273,8 @@ export function parseOverpassPayload(payload: OverpassResponse): {
     const tags = way.tags ?? {};
     const highwayTag = typeof tags.highway === "string" ? tags.highway : undefined;
     const buildingTag = typeof tags.building === "string" ? tags.building : undefined;
-    if (!highwayTag && !buildingTag) {
+    const billboardTag = typeof tags.advertising === "string" ? tags.advertising : undefined;
+    if (!highwayTag && !buildingTag && billboardTag !== "billboard") {
       continue;
     }
 
@@ -181,11 +287,18 @@ export function parseOverpassPayload(payload: OverpassResponse): {
       if (points.length < 2) {
         continue;
       }
+      const roadClass = mapRoadClass(highwayTag);
+      const oneway = inferOneway(tags);
+      const laneData = resolveLaneData(tags, roadClass, oneway);
       const road: Road = {
         id: `osm:way:${way.id}`,
         points,
-        class: mapRoadClass(highwayTag),
-        oneway: inferOneway(tags),
+        class: roadClass,
+        oneway,
+        lanes: laneData.lanes,
+        lanesForward: laneData.lanesForward,
+        lanesBackward: laneData.lanesBackward,
+        lanesInferred: laneData.lanesInferred ? true : undefined,
         name: tags.name ?? tags.ref,
         showDirectionLine: SHOW_DIRECTION_DEFAULT,
         traffic: {
@@ -203,19 +316,43 @@ export function parseOverpassPayload(payload: OverpassResponse): {
       if (footprint.length < 4) {
         continue;
       }
+      const buildingTags = pickBuildingTags(tags);
       const building: Building = {
         id: `osm:way:${way.id}`,
         footprint,
         heightM: parseHeightMeters(tags),
         name: tags.name,
+        tags: buildingTags,
       };
       buildings.push(building);
     }
+
+    if (billboardTag === "billboard") {
+      const centroid = computeCentroid(points);
+      if (!centroid) {
+        continue;
+      }
+      signs.push({
+        id: `osm:way:${way.id}`,
+        location: centroid,
+        kind: "billboard",
+        widthMeters: parseHeightValue(tags.width),
+        heightMeters: parseHeightValue(tags.height),
+        bottomClearanceMeters: parseHeightValue(tags.min_height)
+      });
+    }
+  }
+
+  if (trees.length > MAX_OSM_TREES) {
+    trees.splice(MAX_OSM_TREES);
   }
 
   return {
     roads,
     buildings,
+    trees,
+    signs,
+    trafficSignals,
     nodeCount: nodeIndex.size,
     wayCount: ways.length,
   };
@@ -274,7 +411,102 @@ function parseHeightMeters(tags: OverpassTags): number | undefined {
   return undefined;
 }
 
-function parseHeightValue(raw: string): number | undefined {
+function pickBuildingTags(tags: OverpassTags): Record<string, string> | undefined {
+  const picked: Record<string, string> = {};
+  if (typeof tags.height === "string") {
+    picked.height = tags.height;
+  }
+  if (typeof tags["building:levels"] === "string") {
+    picked["building:levels"] = tags["building:levels"];
+  }
+  if (typeof tags.min_height === "string") {
+    picked.min_height = tags.min_height;
+  }
+  return Object.keys(picked).length > 0 ? picked : undefined;
+}
+
+function mapTreeType(tags: OverpassTags): Tree["type"] {
+  const leafType = tags.leaf_type?.toLowerCase();
+  if (leafType === "needleleaved" || leafType === "needleleaf" || leafType === "needle-leaved") {
+    return "pine";
+  }
+  return "deciduous";
+}
+
+function parseTreeRadiusMeters(tags: OverpassTags): number | undefined {
+  const diameter =
+    parseHeightValue(tags.diameter_crown) ??
+    parseHeightValue(tags["diameter_crown"]) ??
+    parseHeightValue(tags.crown_diameter) ??
+    parseHeightValue(tags["crown_diameter"]);
+  if (!diameter) {
+    return undefined;
+  }
+  return diameter / 2;
+}
+
+function computeCentroid(points: LatLon[]): LatLon | null {
+  if (!points.length) {
+    return null;
+  }
+  let latTotal = 0;
+  let lonTotal = 0;
+  for (const point of points) {
+    latTotal += point.lat;
+    lonTotal += point.lon;
+  }
+  return { lat: latTotal / points.length, lon: lonTotal / points.length };
+}
+
+interface LaneData {
+  lanes?: number;
+  lanesForward?: number;
+  lanesBackward?: number;
+  lanesInferred: boolean;
+}
+
+function resolveLaneData(
+  tags: OverpassTags,
+  roadClass: RoadClass,
+  oneway: RoadDirection
+): LaneData {
+  const lanesTag = parseLaneTag(tags.lanes);
+  const forwardTag = parseLaneTag(tags["lanes:forward"]);
+  const backwardTag = parseLaneTag(tags["lanes:backward"]);
+  let lanes = lanesTag;
+  let lanesForward = forwardTag;
+  let lanesBackward = backwardTag;
+  let lanesInferred = false;
+
+  if (!lanes && (lanesForward || lanesBackward)) {
+    lanes = (lanesForward ?? 0) + (lanesBackward ?? 0);
+  }
+
+  if (!lanes && !lanesForward && !lanesBackward) {
+    lanes = inferLanesByClass(roadClass);
+    lanesInferred = true;
+    if (oneway === "forward") {
+      lanesForward = lanes;
+    } else if (oneway === "backward") {
+      lanesBackward = lanes;
+    }
+  }
+
+  return { lanes, lanesForward, lanesBackward, lanesInferred };
+}
+
+// Lane parsing and inference are shared with the traffic simulation logic.
+
+function parseHeightValue(raw: string | number | null | undefined): number | undefined {
+  if (raw === null || raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw > 0 ? raw : undefined;
+  }
+  if (typeof raw !== "string") {
+    return undefined;
+  }
   const normalized = raw.trim().toLowerCase();
   const match = normalized.match(/-?\d+(\.\d+)?/);
   if (!match) {
@@ -325,8 +557,30 @@ function formatBounds(bounds: GeoBounds): string {
   ].join(",");
 }
 
-function buildCacheKey(endpoint: string, bounds: GeoBounds): string {
-  return `${endpoint}|${formatBounds(bounds)}|${CACHE_TYPES_KEY}`;
+function buildCacheKey(
+  endpoint: string,
+  bounds: GeoBounds,
+  options: {
+    includeObstacles: boolean;
+    includeBuildings: boolean;
+    includeTrafficSignals: boolean;
+    roadClassFilter: RoadClassFilter;
+  }
+): string {
+  return `${endpoint}|${formatBounds(bounds)}|${buildCacheTypesKey(options)}`;
+}
+
+function buildCacheTypesKey(options: {
+  includeObstacles: boolean;
+  includeBuildings: boolean;
+  includeTrafficSignals: boolean;
+  roadClassFilter: RoadClassFilter;
+}): string {
+  const roadKey = options.roadClassFilter === "major" ? "roads:major" : "roads:all";
+  const buildingKey = options.includeBuildings ? "buildings" : "no_buildings";
+  const obstacleKey = options.includeObstacles ? "obstacles" : "no_obstacles";
+  const signalKey = options.includeTrafficSignals ? "signals" : "no_signals";
+  return [CACHE_TYPES_BASE, roadKey, buildingKey, obstacleKey, signalKey].join(",");
 }
 
 function readCache(key: string): Promise<OsmFetchResult> | null {

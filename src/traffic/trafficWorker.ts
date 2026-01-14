@@ -43,6 +43,9 @@ ctx.onmessage = (event: MessageEvent<TrafficWorkerRequest | TrafficWorkerControl
         type: "result",
         runId: activeRunId,
         trafficByRoadId: result.roadTraffic,
+        edgeTraffic: result.edgeTraffic,
+        viewerSamples: result.viewerSamples,
+        epicenters: result.epicenters,
         meta: result.meta,
       });
     }

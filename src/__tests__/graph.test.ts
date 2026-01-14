@@ -51,4 +51,50 @@ describe("buildGraph", () => {
     expect(fromD).toHaveLength(1);
     expect(fromD?.[0].to).toBe("osm:C");
   });
+
+  it("scales edge weights by lanes and class", () => {
+    const roads: Road[] = [
+      {
+        id: "r1",
+        class: "residential",
+        lanes: 1,
+        oneway: "yes",
+        points: [
+          { lat: 0, lon: 0, nodeId: "A1" },
+          { lat: 0, lon: 0.001, nodeId: "A2" }
+        ]
+      },
+      {
+        id: "r2",
+        class: "residential",
+        lanes: 3,
+        oneway: "yes",
+        points: [
+          { lat: 0, lon: 0, nodeId: "B1" },
+          { lat: 0, lon: 0.001, nodeId: "B2" }
+        ]
+      },
+      {
+        id: "r3",
+        class: "motorway",
+        lanes: 3,
+        oneway: "yes",
+        points: [
+          { lat: 0, lon: 0, nodeId: "C1" },
+          { lat: 0, lon: 0.001, nodeId: "C2" }
+        ]
+      }
+    ];
+
+    const graph = buildGraph(roads, { coordPrecision: 6 });
+    const weight1 = graph.edges.find((edge) => edge.roadId === "r1")?.weight ?? 0;
+    const weight2 = graph.edges.find((edge) => edge.roadId === "r2")?.weight ?? 0;
+    const weight3 = graph.edges.find((edge) => edge.roadId === "r3")?.weight ?? 0;
+
+    expect(weight1).toBeGreaterThan(0);
+    expect(weight2).toBeGreaterThan(0);
+    expect(weight3).toBeGreaterThan(0);
+    expect(weight2).toBeLessThan(weight1);
+    expect(weight3).toBeLessThan(weight2);
+  });
 });

@@ -10,9 +10,39 @@ describe("routing", () => {
   ]);
 
   const edges: GraphEdge[] = [
-    { id: "A-B", from: "A", to: "B", roadId: "r1", lengthM: 100, weight: 1, forward: true },
-    { id: "A-C", from: "A", to: "C", roadId: "r2", lengthM: 100, weight: 1, forward: true },
-    { id: "C-B", from: "C", to: "B", roadId: "r2", lengthM: 100, weight: 1.5, forward: true }
+    {
+      id: "A-B",
+      from: "A",
+      to: "B",
+      roadId: "r1",
+      lengthM: 100,
+      baseTimeS: 10,
+      speedMps: 10,
+      weight: 1,
+      forward: true
+    },
+    {
+      id: "A-C",
+      from: "A",
+      to: "C",
+      roadId: "r2",
+      lengthM: 100,
+      baseTimeS: 10,
+      speedMps: 10,
+      weight: 1,
+      forward: true
+    },
+    {
+      id: "C-B",
+      from: "C",
+      to: "B",
+      roadId: "r2",
+      lengthM: 100,
+      baseTimeS: 10,
+      speedMps: 10,
+      weight: 1.5,
+      forward: true
+    }
   ];
 
   const adjacency = new Map<string, GraphEdge[]>([

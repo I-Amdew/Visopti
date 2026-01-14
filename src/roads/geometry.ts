@@ -132,6 +132,107 @@ export function computeBounds(points: Point[]): Bounds | null {
   return { minX, minY, maxX, maxY };
 }
 
+export interface OffsetPolylineOptions {
+  miterLimit?: number;
+  minSegmentLength?: number;
+}
+
+export function offsetPolyline(
+  points: Point[],
+  offset: number,
+  options: OffsetPolylineOptions = {}
+): Point[] {
+  if (points.length < 2 || offset === 0) {
+    return points.map((point) => ({ x: point.x, y: point.y }));
+  }
+  const minSegmentLength = options.minSegmentLength ?? 1e-3;
+  const miterLimit = Math.max(1, options.miterLimit ?? 4);
+  const segmentCount = points.length - 1;
+  const normals: Array<Point | null> = new Array(segmentCount).fill(null);
+  for (let i = 0; i < segmentCount; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len > minSegmentLength) {
+      normals[i] = { x: -dy / len, y: dx / len };
+    }
+  }
+  let firstValid = -1;
+  let lastValid = -1;
+  for (let i = 0; i < segmentCount; i += 1) {
+    if (normals[i]) {
+      if (firstValid < 0) {
+        firstValid = i;
+      }
+      lastValid = i;
+    }
+  }
+  if (firstValid < 0 || lastValid < 0) {
+    return points.map((point) => ({ x: point.x, y: point.y }));
+  }
+  const prevValid: number[] = new Array(segmentCount).fill(-1);
+  const nextValid: number[] = new Array(segmentCount).fill(-1);
+  for (let i = 0; i < segmentCount; i += 1) {
+    prevValid[i] = normals[i] ? i : i > 0 ? prevValid[i - 1] : -1;
+  }
+  for (let i = segmentCount - 1; i >= 0; i -= 1) {
+    nextValid[i] = normals[i] ? i : i < segmentCount - 1 ? nextValid[i + 1] : -1;
+  }
+
+  const result: Point[] = [];
+  const miterLimitDistance = Math.abs(offset) * miterLimit;
+  for (let i = 0; i < points.length; i += 1) {
+    if (i === 0) {
+      const normal = normals[firstValid] as Point;
+      result.push({ x: points[i].x + normal.x * offset, y: points[i].y + normal.y * offset });
+      continue;
+    }
+    if (i === points.length - 1) {
+      const normal = normals[lastValid] as Point;
+      result.push({ x: points[i].x + normal.x * offset, y: points[i].y + normal.y * offset });
+      continue;
+    }
+    const prevIndex = prevValid[i - 1];
+    const nextIndex = nextValid[i];
+    const prev = prevIndex >= 0 ? normals[prevIndex] : null;
+    const next = nextIndex >= 0 ? normals[nextIndex] : null;
+    if (!prev && !next) {
+      result.push({ x: points[i].x, y: points[i].y });
+      continue;
+    }
+    if (!prev || !next) {
+      const normal = (prev ?? next) as Point;
+      result.push({ x: points[i].x + normal.x * offset, y: points[i].y + normal.y * offset });
+      continue;
+    }
+    const sumX = prev.x + next.x;
+    const sumY = prev.y + next.y;
+    const sumLen = Math.hypot(sumX, sumY);
+    if (sumLen <= 1e-6) {
+      result.push({ x: points[i].x + next.x * offset, y: points[i].y + next.y * offset });
+      continue;
+    }
+    const miterX = sumX / sumLen;
+    const miterY = sumY / sumLen;
+    const denom = miterX * next.x + miterY * next.y;
+    if (Math.abs(denom) <= 1e-3) {
+      result.push({ x: points[i].x + next.x * offset, y: points[i].y + next.y * offset });
+      continue;
+    }
+    let miterLength = offset / denom;
+    if (Math.abs(miterLength) > miterLimitDistance) {
+      miterLength = Math.sign(miterLength) * miterLimitDistance;
+    }
+    result.push({
+      x: points[i].x + miterX * miterLength,
+      y: points[i].y + miterY * miterLength
+    });
+  }
+  return result;
+}
+
 export function expandBounds(bounds: Bounds, padding: number): Bounds {
   return {
     minX: bounds.minX - padding,

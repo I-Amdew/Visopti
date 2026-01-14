@@ -32,6 +32,10 @@ export interface Road {
   points: LatLon[];
   class: RoadClass;
   oneway: RoadDirection;
+  lanes?: number;
+  lanesForward?: number;
+  lanesBackward?: number;
+  lanesInferred?: boolean;
   name?: string;
   showDirectionLine: boolean;
   traffic: RoadTraffic;
@@ -42,4 +46,32 @@ export interface Building {
   footprint: LatLon[];
   heightM?: number;
   name?: string;
+  tags?: Record<string, string>;
+}
+
+export type TreeType = "pine" | "deciduous";
+
+export interface Tree {
+  id: string;
+  location: LatLon;
+  type: TreeType;
+  baseRadiusMeters: number;
+  heightMeters?: number;
+}
+
+export type SignKind = "billboard" | "sign";
+
+export interface Sign {
+  id: string;
+  location: LatLon;
+  kind: SignKind;
+  widthMeters?: number;
+  heightMeters?: number;
+  bottomClearanceMeters?: number;
+  yawDegrees?: number;
+}
+
+export interface TrafficSignal {
+  id: string;
+  location: LatLon;
 }

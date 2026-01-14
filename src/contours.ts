@@ -20,6 +20,9 @@ export function generateContourSegments(mapper: GeoMapper, intervalFeet = 1): Co
   let maxValue = Number.NEGATIVE_INFINITY;
   for (const row of grid.values) {
     for (const value of row) {
+      if (!Number.isFinite(value)) {
+        continue;
+      }
       if (value < minValue) minValue = value;
       if (value > maxValue) maxValue = value;
     }
@@ -47,6 +50,9 @@ export function generateContourSegments(mapper: GeoMapper, intervalFeet = 1): Co
         const v1 = grid.values[r][c + 1];
         const v2 = grid.values[r + 1][c + 1];
         const v3 = grid.values[r + 1][c];
+        if (![v0, v1, v2, v3].every((value) => Number.isFinite(value))) {
+          continue;
+        }
         const cellMin = Math.min(v0, v1, v2, v3);
         const cellMax = Math.max(v0, v1, v2, v3);
         if (level < cellMin || level > cellMax) {

@@ -1,3 +1,4 @@
+import { laneCapacityFactor, resolveLaneCounts } from "./lanes";
 import { Road, RoadClass, RoadId } from "./types";
 
 export interface GraphNode {
@@ -12,6 +13,8 @@ export interface GraphEdge {
   to: string;
   roadId: RoadId;
   lengthM: number;
+  baseTimeS: number;
+  speedMps: number;
   weight: number;
   forward: boolean;
 }
@@ -82,6 +85,11 @@ export function buildGraph(roads: Road[], options: GraphBuildOptions = {}): Grap
     }
     const speedMps = speedForClass(road.class);
     const oneway = parseOneway(road.oneway);
+    const laneCounts = resolveLaneCounts(road);
+    const forwardLanes = laneCounts.forward > 0 ? laneCounts.forward : laneCounts.total;
+    const backwardLanes = laneCounts.backward > 0 ? laneCounts.backward : laneCounts.total;
+    const forwardCapacity = laneCapacityFactor(forwardLanes);
+    const backwardCapacity = laneCapacityFactor(backwardLanes);
 
     for (let i = 0; i < road.points.length - 1; i += 1) {
       const a = road.points[i];
@@ -98,7 +106,7 @@ export function buildGraph(roads: Road[], options: GraphBuildOptions = {}): Grap
       if (!Number.isFinite(lengthM) || lengthM <= 0) {
         continue;
       }
-      const weight = lengthM / speedMps;
+      const baseTimeS = lengthM / speedMps;
 
       if (oneway >= 0) {
         const edgeId = `${road.id}:${i}:f`;
@@ -108,7 +116,9 @@ export function buildGraph(roads: Road[], options: GraphBuildOptions = {}): Grap
           to: toId,
           roadId: road.id,
           lengthM,
-          weight,
+          baseTimeS,
+          speedMps,
+          weight: baseTimeS / forwardCapacity,
           forward: true,
         };
         edges.push(edge);
@@ -122,7 +132,9 @@ export function buildGraph(roads: Road[], options: GraphBuildOptions = {}): Grap
           to: fromId,
           roadId: road.id,
           lengthM,
-          weight,
+          baseTimeS,
+          speedMps,
+          weight: baseTimeS / backwardCapacity,
           forward: false,
         };
         edges.push(edge);
