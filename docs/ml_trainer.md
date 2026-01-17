@@ -42,10 +42,9 @@
 - This restores the trainer dataset (labels, regions, negatives) without needing image files.
 
 ## Review mode
-1. Import a predictions JSON and click **Start review**.
+1. Import a predictions JSON and click **Start review** (if no predictions are queued, the trainer scans random patches in the active region; dense cover samples are included).
 2. Use `0` = Good, `1` = Bad, `3` = Wrong tree type (toggles pine/deciduous).
-3. Dense cover predictions can be refined:
+3. Dense cover predictions/samples can be refined:
    - Drag corners to reshape.
    - Click an edge to add a corner.
    - Drag the center handle to move the polygon.
-4. Use **Start dense cover review** to sample patches; accept to add dense cover, reject to skip.

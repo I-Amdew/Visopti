@@ -83,7 +83,7 @@ describe("trainer dataset serialization", () => {
         {
           id: "sign-2",
           regionId: "region-1",
-          class: "stop_sign",
+          class: "billboard",
           lat: 47.601,
           lon: -122.324,
           createdAt: 410

@@ -119,7 +119,7 @@ async function ensureTreeSignsModel(): Promise<LoadedModel> {
       const inputWidth = normalizeInputSize(manifest.input?.width);
       const inputHeight = normalizeInputSize(manifest.input?.height);
       const cacheBuster = manifest.sha256 ? `sha256=${encodeURIComponent(manifest.sha256)}` : `ts=${Date.now()}`;
-      const onnxUrl = `/models/treesigns/latest.onnx?${cacheBuster}`;
+      const onnxUrl = resolveModelUrl(`/models/treesigns/latest.onnx?${cacheBuster}`);
       const session = await ort.InferenceSession.create(onnxUrl, {
         executionProviders: ["wasm"]
       });
@@ -144,7 +144,7 @@ async function ensureTreeSignsModel(): Promise<LoadedModel> {
 }
 
 async function fetchManifest(): Promise<TreeSignsManifest> {
-  const url = `/models/treesigns/manifest.json?ts=${Date.now()}`;
+  const url = resolveModelUrl(`/models/treesigns/manifest.json?ts=${Date.now()}`);
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`Model manifest unavailable (${response.status}).`);
@@ -162,6 +162,21 @@ function configureWasm(): void {
   }
   ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
   wasmConfigured = true;
+}
+
+function resolveModelUrl(path: string): string {
+  if (typeof window === "undefined") {
+    return path;
+  }
+  try {
+    const base =
+      window.location.origin && window.location.origin !== "null"
+        ? window.location.origin
+        : window.location.href;
+    return new URL(path, base).toString();
+  } catch {
+    return path;
+  }
 }
 
 function ensureSourceCanvas(

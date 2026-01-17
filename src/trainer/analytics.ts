@@ -26,8 +26,7 @@ export interface DatasetAnalytics {
   counts: {
     pine: number;
     deciduous: number;
-    billboard: number;
-    stopSign: number;
+    signSamples: number;
     totalTrees: number;
     totalSigns: number;
     totalNegatives: number;
@@ -67,8 +66,7 @@ export function computeDatasetAnalytics(dataset: TrainerDataset): DatasetAnalyti
   const sampleCounts = countSampleClasses(samples);
   const pine = sampleCounts.tree_pine;
   const deciduous = sampleCounts.tree_deciduous;
-  const billboard = sampleCounts.billboard;
-  const stopSign = sampleCounts.stop_sign;
+  const signSamples = sampleCounts.billboard + sampleCounts.stop_sign;
   const totalTrees = dataset.trees.length;
   const totalSigns = dataset.signs.length;
   const totalNegatives = sampleCounts.negative;
@@ -104,8 +102,7 @@ export function computeDatasetAnalytics(dataset: TrainerDataset): DatasetAnalyti
     counts: {
       pine,
       deciduous,
-      billboard,
-      stopSign,
+      signSamples,
       totalTrees,
       totalSigns,
       totalNegatives,

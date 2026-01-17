@@ -31,7 +31,6 @@ import {
 } from "../ml/inference";
 
 const TRAINER_FLAG = "visoptiTrainer";
-const TRAINER_SYNC_FLAG = "visoptiTrainerSync";
 const TRAINER_SYNC_STATE_KEY = "visoptiTrainerSyncState";
 const TRAINER_SYNC_SCHEMA_VERSION = 1;
 const TRAINER_SYNC_DEBOUNCE_MS = 800;
@@ -47,6 +46,7 @@ const REVIEW_MAX_ZOOM = 19;
 const EDIT_HANDLE_RADIUS_PX = 7;
 const EDIT_EDGE_THRESHOLD_PX = 6;
 const EDIT_CENTER_RADIUS_PX = 10;
+const DRAW_CLOSE_THRESHOLD_PX = 12;
 const REVIEW_HINT_DEFAULT = "Keys: 0 = Good, 1 = Bad, 3 = Wrong type, [ / ] = Radius.";
 const ML_MANIFEST_POLL_MS = 8000;
 const ML_PATCH_OVERLAP = 0.35;
@@ -59,8 +59,7 @@ type Tool =
   | "tree_deciduous"
   | "tree_pine"
   | "dense_cover"
-  | "sign_billboard"
-  | "sign_stop";
+  | "sign";
 
 type LabelSelection =
   | { kind: "tree"; id: string }
@@ -79,14 +78,13 @@ type DrawingState =
   | { kind: "polygon"; polygonType: "region" | "dense_cover"; points: GeoPoint[] }
   | {
       kind: "sign";
-      signType: "billboard" | "stop_sign";
       startPx: Point;
       startLatLon: GeoPoint;
       currentPx: Point | null;
     }
   | null;
 
-type ReviewMode = "predictions" | "dense_random";
+type ReviewMode = "combined";
 
 type ReviewItem =
   | { kind: "prediction"; prediction: Prediction }
@@ -123,16 +121,14 @@ const TOOL_LABELS: Record<Tool, string> = {
   tree_deciduous: "Add Deciduous Tree",
   tree_pine: "Add Pine Tree",
   dense_cover: "Dense Cover Polygon",
-  sign_billboard: "Add Billboard",
-  sign_stop: "Add Stop Sign"
+  sign: "Add Billboard"
 };
 
 const TOOL_REQUIRES_REGION = new Set<Tool>([
   "tree_deciduous",
   "tree_pine",
   "dense_cover",
-  "sign_billboard",
-  "sign_stop"
+  "sign"
 ]);
 
 const COLORS = {
@@ -143,8 +139,7 @@ const COLORS = {
   treePine: "rgba(47, 191, 113, 0.28)",
   treeDeciduous: "rgba(228, 180, 63, 0.3)",
   treeStroke: "rgba(15, 20, 26, 0.8)",
-  signBillboard: "rgba(245, 158, 11, 0.85)",
-  signStop: "rgba(239, 68, 68, 0.9)",
+  sign: "rgba(245, 158, 11, 0.85)",
   selection: "rgba(255, 255, 255, 0.9)"
 };
 
@@ -231,8 +226,8 @@ async function initTrainer(): Promise<void> {
 
   const store = await createDatasetStore();
   let dataset = store.getSnapshot();
-  const trainerSyncEnabledEnv = import.meta.env.VITE_ENABLE_TRAINER_SYNC === "1";
-  let trainerSyncEnabled = readTrainerSyncFlag();
+  const trainerSyncEnabledEnv = true;
+  const trainerSyncEnabled = true;
   const trainerSyncState = loadTrainerSyncState();
   const syncedSampleUpdatedAt = new Map<string, number>(
     Object.entries(trainerSyncState.sampleUpdatedAtById ?? {}).map(([id, ts]) => [
@@ -327,9 +322,6 @@ async function initTrainer(): Promise<void> {
   const importDatasetInput = document.getElementById(
     "trainerImportDataset"
   ) as HTMLInputElement | null;
-  const trainerSyncToggle = document.getElementById(
-    "trainerSyncToggle"
-  ) as HTMLInputElement | null;
   const trainerSyncStatus = document.getElementById("trainerSyncStatus");
   const datasetStatus = document.getElementById("trainerDatasetStatus");
   const exportProgressRow = document.getElementById("trainerExportProgress");
@@ -341,8 +333,7 @@ async function initTrainer(): Promise<void> {
   const analyticsPanel = document.getElementById("trainerAnalytics");
   const analyticsPine = document.getElementById("trainerAnalyticsPine");
   const analyticsDeciduous = document.getElementById("trainerAnalyticsDeciduous");
-  const analyticsBillboard = document.getElementById("trainerAnalyticsBillboard");
-  const analyticsStop = document.getElementById("trainerAnalyticsStop");
+  const analyticsSigns = document.getElementById("trainerAnalyticsSigns");
   const analyticsNegatives = document.getElementById("trainerAnalyticsNegatives");
   const analyticsDenseSamples = document.getElementById("trainerAnalyticsDenseSamples");
   const analyticsAvgRadius = document.getElementById("trainerAnalyticsAvgRadius");
@@ -370,9 +361,6 @@ async function initTrainer(): Promise<void> {
   ) as HTMLButtonElement | null;
   const clearReviewButton = document.getElementById(
     "trainerClearReview"
-  ) as HTMLButtonElement | null;
-  const startDenseReviewButton = document.getElementById(
-    "trainerStartDenseReview"
   ) as HTMLButtonElement | null;
   const reviewStatus = document.getElementById("trainerReviewStatus");
   const reviewModePanel = document.getElementById("trainerReviewMode");
@@ -413,10 +401,20 @@ async function initTrainer(): Promise<void> {
   const trainingPatchSize = document.getElementById(
     "trainingPatchSize"
   ) as HTMLSelectElement | null;
+  const trainingImageryProvider = document.getElementById(
+    "trainingImageryProvider"
+  ) as HTMLInputElement | null;
+  const trainingImageryZoom = document.getElementById(
+    "trainingImageryZoom"
+  ) as HTMLInputElement | null;
+  const trainingImageryZoomValue = document.getElementById("trainingImageryZoomValue");
   const trainingTreeZoom = document.getElementById(
     "trainingTreeZoom"
   ) as HTMLInputElement | null;
   const trainingTreeZoomValue = document.getElementById("trainingTreeZoomValue");
+  const trainingTreeContextMultiplier = document.getElementById(
+    "trainingTreeContextMultiplier"
+  ) as HTMLInputElement | null;
   const trainingDenseZoom = document.getElementById(
     "trainingDenseZoom"
   ) as HTMLInputElement | null;
@@ -473,11 +471,23 @@ async function initTrainer(): Promise<void> {
     if (trainingPatchSize) {
       trainingPatchSize.value = `${config.patchSizePx}`;
     }
+    if (trainingImageryProvider) {
+      trainingImageryProvider.value = dataset.imagery.providerId;
+    }
+    if (trainingImageryZoom) {
+      trainingImageryZoom.value = `${dataset.imagery.zoom}`;
+    }
+    if (trainingImageryZoomValue) {
+      trainingImageryZoomValue.textContent = `${dataset.imagery.zoom}`;
+    }
     if (trainingTreeZoom) {
       trainingTreeZoom.value = `${config.treeZoom}`;
     }
     if (trainingTreeZoomValue) {
       trainingTreeZoomValue.textContent = `${config.treeZoom}`;
+    }
+    if (trainingTreeContextMultiplier) {
+      trainingTreeContextMultiplier.value = formatNumber(config.treeContextRadiusMultiplier);
     }
     if (trainingDenseZoom) {
       trainingDenseZoom.value = `${config.denseCoverZoom}`;
@@ -505,22 +515,33 @@ async function initTrainer(): Promise<void> {
     });
   };
 
+  const updateImageryConfig = (next: Partial<TrainerDataset["imagery"]>) => {
+    store.update((draft) => {
+      draft.imagery = {
+        ...draft.imagery,
+        ...next
+      };
+    });
+  };
+
   const updateReviewControls = () => {
+    const remainingCount = predictionQueue.length + denseReviewQueue.length;
+    const canStartReview = remainingCount > 0 || dataset.regions.length > 0;
     if (reviewQueueCount) {
-      reviewQueueCount.textContent = predictionQueue.length.toString();
+      reviewQueueCount.textContent = remainingCount.toString();
     }
     if (startReviewButton) {
-      startReviewButton.disabled = predictionQueue.length === 0 || reviewMode !== null;
+      startReviewButton.disabled = !canStartReview || reviewMode !== null;
     }
     if (clearReviewButton) {
-      clearReviewButton.disabled = predictionQueue.length === 0 || reviewMode !== null;
-    }
-    if (startDenseReviewButton) {
-      startDenseReviewButton.disabled = reviewMode !== null;
+      clearReviewButton.disabled = remainingCount === 0 || reviewMode !== null;
     }
   };
 
-  const applyPredictionQueue = (predictions: Prediction[], imagery: { providerId: string; zoom: number }) => {
+  const applyPredictionQueue = (
+    predictions: Prediction[],
+    imagery: { providerId: string; zoom: number }
+  ) => {
     predictionQueue = predictions;
     predictionCatalog = predictions.slice();
     predictionById = new Map(predictionCatalog.map((prediction) => [prediction.id, prediction]));
@@ -528,6 +549,9 @@ async function initTrainer(): Promise<void> {
     reviewAcceptedTreeEdits.clear();
     predictionQueueTotal = predictionQueue.length;
     predictionReviewedCount = 0;
+    denseReviewQueue = [];
+    denseReviewTotal = 0;
+    denseReviewReviewedCount = 0;
     reviewImagery = imagery;
     reviewOverrideClass = null;
     reviewPreload = null;
@@ -608,7 +632,7 @@ async function initTrainer(): Promise<void> {
 
   const fetchMlManifest = async (): Promise<TreeSignsManifest | null> => {
     try {
-      const response = await fetch(`/models/treesigns/manifest.json?ts=${Date.now()}`, {
+      const response = await fetch(resolveModelUrl(`/models/treesigns/manifest.json?ts=${Date.now()}`), {
         cache: "no-store"
       });
       if (!response.ok) {
@@ -621,6 +645,21 @@ async function initTrainer(): Promise<void> {
       return manifest;
     } catch {
       return null;
+    }
+  };
+
+  const resolveModelUrl = (path: string): string => {
+    if (typeof window === "undefined") {
+      return path;
+    }
+    try {
+      const base =
+        window.location.origin && window.location.origin !== "null"
+          ? window.location.origin
+          : window.location.href;
+      return new URL(path, base).toString();
+    } catch {
+      return path;
     }
   };
 
@@ -647,10 +686,12 @@ async function initTrainer(): Promise<void> {
         setMlStatus(null);
       }
     } catch (err) {
-      setMlStatus(
-        `Model load failed: ${err instanceof Error ? err.message : "unknown error"}`,
-        { timeoutMs: 5000 }
-      );
+      const rawMessage = err instanceof Error ? err.message : "unknown error";
+      const needsHint = /expected pattern|failed to fetch|networkerror/i.test(rawMessage);
+      const hint = needsHint
+        ? " Check that the app is served from the dev server and model files exist in /public/models/treesigns."
+        : "";
+      setMlStatus(`Model load failed: ${rawMessage}${hint}`, { timeoutMs: 6000 });
     } finally {
       mlLoading = false;
       updateMlButtons();
@@ -681,16 +722,10 @@ async function initTrainer(): Promise<void> {
     }
   };
 
-  if (trainerSyncToggle) {
-    trainerSyncToggle.checked = trainerSyncEnabled;
-    if (!trainerSyncEnabledEnv) {
-      trainerSyncToggle.disabled = true;
-    }
-  }
-  if (!trainerSyncEnabledEnv) {
-    setSyncStatus("Trainer sync disabled. Set VITE_ENABLE_TRAINER_SYNC=1.");
-  } else if (trainerSyncEnabled && lastSyncedAt > 0) {
+  if (trainerSyncEnabled && lastSyncedAt > 0) {
     setSyncStatus(`Synced at ${formatClockTime(lastSyncedAt)}.`);
+  } else {
+    setSyncStatus("Syncing trainer dataset to repo.");
   }
 
   const setReviewStatus = (message: string | null) => {
@@ -719,14 +754,140 @@ async function initTrainer(): Promise<void> {
     reviewHint.classList.remove("hidden");
   };
 
-  const proposeDetectionsInView = async () => {
+  const proposeDetectionsInRandomRegion = async (options?: {
+    autoStart?: boolean;
+    sampleCount?: number;
+  }): Promise<boolean> => {
     if (reviewMode) {
       setReviewStatus("Exit review mode before proposing detections.");
-      return;
+      return false;
+    }
+    const region =
+      dataset.regions.find((value) => value.id === activeRegionId) ??
+      dataset.regions[0] ??
+      null;
+    if (!region) {
+      setReviewStatus("Select a region before starting review.");
+      return false;
+    }
+    mlDetecting = true;
+    updateMlButtons();
+    setReviewStatus(null);
+    setMlStatus("Scanning random patches for detections…", { timeoutMs: 0 });
+    try {
+      await loadMlModel({ notify: false });
+      if (!mlManifest) {
+        setMlStatus("Model manifest unavailable.", { timeoutMs: 4000 });
+        return false;
+      }
+      const tileSource = resolveReviewTileSource(dataset.imagery.providerId);
+      const zoom = normalizeReviewZoom(dataset.imagery.zoom, tileSource.maxZoom);
+      const patchSizePx = normalizePatchSize(mlManifest.input?.width ?? DEFAULT_PATCH_SIZE_PX);
+      const center = averageLatLon(region.boundsPolygonLatLon);
+      if (!center) {
+        setReviewStatus("Region bounds are invalid for review.");
+        return false;
+      }
+      const patchSizeMeters = patchSizePx * metersPerPixelAtLat(center.lat, zoom);
+      const centers = sampleNegativePatches(
+        region,
+        { trees: [], signs: [] },
+        patchSizeMeters,
+        options?.sampleCount ?? DEFAULT_DENSE_REVIEW_COUNT
+      );
+      if (centers.length === 0) {
+        setReviewStatus("No review patches sampled for this region.");
+        return false;
+      }
+      const detections: Array<
+        PatchPrediction & { worldCx: number; worldCy: number; worldW: number; worldH: number }
+      > = [];
+      for (let i = 0; i < centers.length; i += 1) {
+        const target = centers[i];
+        const centerLatLon = { lat: target.centerLat, lon: target.centerLon };
+        const canvas = await renderPatchImage({
+          centerLatLon,
+          zoom,
+          sizePx: patchSizePx,
+          tileSource
+        });
+        const patchPredictions = await detectOnPatch(canvas);
+        const worldCenter = projectLatLonForReview(centerLatLon.lat, centerLatLon.lon, zoom);
+        patchPredictions.forEach((prediction) => {
+          if (!ML_SUPPORTED_CLASSES.has(prediction.class as PredictionClass)) {
+            return;
+          }
+          detections.push({
+            ...prediction,
+            worldCx: worldCenter.x + (prediction.cx - patchSizePx / 2),
+            worldCy: worldCenter.y + (prediction.cy - patchSizePx / 2),
+            worldW: prediction.w,
+            worldH: prediction.h
+          });
+        });
+        setMlStatus(`Scanning ${i + 1} / ${centers.length}…`, { timeoutMs: 0 });
+        if (ML_PATCH_THROTTLE_MS > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, ML_PATCH_THROTTLE_MS));
+        }
+      }
+      const merged = applyMlNms(detections, ML_NMS_IOU);
+      const predictions = merged.map((prediction) => {
+        const centerLatLon = unprojectLatLonForReview(
+          prediction.worldCx,
+          prediction.worldCy,
+          zoom
+        );
+        const record: Prediction = {
+          id: createId("pred"),
+          class: prediction.class as PredictionClass,
+          centerLat: centerLatLon.lat,
+          centerLon: centerLatLon.lon,
+          confidence: prediction.confidence
+        };
+        if (activeRegionId) {
+          record.regionHintId = activeRegionId;
+        }
+        if (isTreeClass(record.class)) {
+          const metersPerPixel = metersPerPixelAtLat(centerLatLon.lat, zoom);
+          const radiusPx = 0.5 * Math.max(prediction.worldW, prediction.worldH);
+          if (Number.isFinite(metersPerPixel)) {
+            record.crownRadiusMeters = Math.max(0, radiusPx * metersPerPixel);
+          }
+        }
+        return record;
+      });
+      if (predictions.length === 0) {
+        setReviewStatus("No detections found in random samples.");
+        setMlStatus("No detections found.", { timeoutMs: 3000 });
+        return false;
+      }
+      applyPredictionQueue(predictions, {
+        providerId: tileSource.id,
+        zoom
+      });
+      setMlStatus(`Queued ${predictions.length} detections.`, { timeoutMs: 3000 });
+      if (options?.autoStart !== false) {
+        void startReview({ autoDetect: false });
+      }
+      return true;
+    } catch (err) {
+      setReviewStatus(`Detection failed: ${err instanceof Error ? err.message : "unknown error"}`);
+      setMlStatus("Detection failed.", { timeoutMs: 4000 });
+      return false;
+    } finally {
+      mlDetecting = false;
+      updateMlButtons();
+    }
+  };
+
+  const proposeDetectionsInView = async (options?: { autoStart?: boolean }): Promise<boolean> => {
+    if (reviewMode) {
+      setReviewStatus("Exit review mode before proposing detections.");
+      return false;
     }
     if (!geoProjector) {
       setReviewStatus("Map view unavailable for ML detection.");
-      return;
+      return false;
     }
     mlDetecting = true;
     updateMlButtons();
@@ -736,7 +897,7 @@ async function initTrainer(): Promise<void> {
       await loadMlModel({ notify: false });
       if (!mlManifest) {
         setMlStatus("Model manifest unavailable.", { timeoutMs: 4000 });
-        return;
+        return false;
       }
       const tileSource = getTileSource(mapView.getTileSourceId());
       const zoom = Math.min(tileSource.maxZoom, Math.max(0, Math.round(mapView.getZoom())));
@@ -818,17 +979,21 @@ async function initTrainer(): Promise<void> {
       if (predictions.length === 0) {
         setReviewStatus("No detections found in view.");
         setMlStatus("No detections found.", { timeoutMs: 3000 });
-        return;
+        return false;
       }
       applyPredictionQueue(predictions, {
         providerId: tileSource.id,
         zoom
       });
       setMlStatus(`Queued ${predictions.length} detections.`, { timeoutMs: 3000 });
-      enterReviewMode("predictions");
+      if (options?.autoStart !== false) {
+        void startReview({ autoDetect: false });
+      }
+      return true;
     } catch (err) {
       setReviewStatus(`Detection failed: ${err instanceof Error ? err.message : "unknown error"}`);
       setMlStatus("Detection failed.", { timeoutMs: 4000 });
+      return false;
     } finally {
       mlDetecting = false;
       updateMlButtons();
@@ -867,10 +1032,9 @@ async function initTrainer(): Promise<void> {
     if (analyticsDeciduous) {
       analyticsDeciduous.textContent = analytics.counts.deciduous.toString();
     }
-    if (analyticsBillboard) {
-      analyticsBillboard.textContent = analytics.counts.billboard.toString();
+    if (analyticsSigns) {
+      analyticsSigns.textContent = analytics.counts.signSamples.toString();
     }
-    if (analyticsStop) analyticsStop.textContent = analytics.counts.stopSign.toString();
     if (analyticsNegatives) {
       analyticsNegatives.textContent = analytics.counts.totalNegatives.toString();
     }
@@ -917,6 +1081,11 @@ async function initTrainer(): Promise<void> {
     }
     if (TOOL_REQUIRES_REGION.has(activeTool) && !region) {
       statusLine.textContent = "Create or select a region before labeling.";
+      return;
+    }
+    if (activeTool === "dense_cover" && drawingState?.kind === "polygon") {
+      statusLine.textContent =
+        "Dense cover: click to add points, click the first point or press Enter/double-click to close.";
       return;
     }
     statusLine.textContent = region
@@ -1087,6 +1256,9 @@ async function initTrainer(): Promise<void> {
       reviewAcceptedTreeEdits.clear();
       predictionQueueTotal = predictionQueue.length;
       predictionReviewedCount = 0;
+      denseReviewQueue = [];
+      denseReviewTotal = 0;
+      denseReviewReviewedCount = 0;
       reviewImagery = result.set.imagery;
       reviewOverrideClass = null;
       reviewPreload = null;
@@ -1115,46 +1287,36 @@ async function initTrainer(): Promise<void> {
     reviewAcceptedTreeEdits.clear();
     predictionQueueTotal = 0;
     predictionReviewedCount = 0;
+    denseReviewQueue = [];
+    denseReviewTotal = 0;
+    denseReviewReviewedCount = 0;
     reviewImagery = null;
     reviewOverrideClass = null;
     reviewPreload = null;
-    setReviewStatus("Prediction queue cleared.");
+    setReviewStatus("Review queue cleared.");
     updateReviewControls();
     updateActionButtons();
   };
 
-  const startPredictionReview = () => {
-    if (reviewMode) {
-      return;
-    }
-    if (predictionQueue.length === 0) {
-      setReviewStatus("Import predictions before starting review.");
-      return;
-    }
-    if (predictionQueueTotal === 0) {
-      predictionQueueTotal = predictionQueue.length;
-    }
-    enterReviewMode("predictions");
-  };
-
-  const startDenseCoverReview = () => {
-    if (reviewMode) {
-      return;
-    }
+  const buildDenseReviewQueue = (options?: { silent?: boolean }): boolean => {
     const region =
       dataset.regions.find((value) => value.id === activeRegionId) ??
       dataset.regions[0] ??
       null;
     if (!region) {
-      setReviewStatus("Select a region before starting dense cover review.");
-      return;
+      if (!options?.silent) {
+        setReviewStatus("Select a region before starting review.");
+      }
+      return false;
     }
     const tileSource = resolveReviewTileSource(dataset.imagery.providerId);
     const zoom = normalizeReviewZoom(dataset.imagery.zoom, tileSource.maxZoom);
     const center = averageLatLon(region.boundsPolygonLatLon);
     if (!center) {
-      setReviewStatus("Region bounds are invalid for dense cover review.");
-      return;
+      if (!options?.silent) {
+        setReviewStatus("Region bounds are invalid for review.");
+      }
+      return false;
     }
     const patchSizeMeters = DEFAULT_PATCH_SIZE_PX * metersPerPixelAtLat(center.lat, zoom);
     const regionTrees = dataset.trees.filter((tree) => tree.regionId === region.id);
@@ -1171,12 +1333,40 @@ async function initTrainer(): Promise<void> {
       regionId: region.id
     }));
     if (denseReviewQueue.length === 0) {
-      setReviewStatus("No dense cover patches sampled for this region.");
-      return;
+      if (!options?.silent) {
+        setReviewStatus("No dense cover patches sampled for this region.");
+      }
+      return false;
     }
     denseReviewTotal = denseReviewQueue.length;
     denseReviewReviewedCount = 0;
-    enterReviewMode("dense_random");
+    return true;
+  };
+
+  const startReview = async (options?: { autoDetect?: boolean }) => {
+    if (reviewMode) {
+      return;
+    }
+    let hasPredictions = predictionQueue.length > 0;
+    if (!hasPredictions && options?.autoDetect !== false) {
+      hasPredictions = await proposeDetectionsInRandomRegion({ autoStart: false });
+      if (!hasPredictions && dataset.regions.length === 0) {
+        hasPredictions = await proposeDetectionsInView({ autoStart: false });
+      }
+    }
+    const hasDenseReview =
+      denseReviewQueue.length > 0 || buildDenseReviewQueue({ silent: hasPredictions });
+    if (!hasPredictions && !hasDenseReview) {
+      return;
+    }
+    if (predictionQueueTotal === 0) {
+      predictionQueueTotal = predictionQueue.length;
+    }
+    if (denseReviewTotal === 0 && denseReviewQueue.length > 0) {
+      denseReviewTotal = denseReviewQueue.length;
+      denseReviewReviewedCount = 0;
+    }
+    enterReviewMode("combined");
   };
 
   const enterReviewMode = (mode: ReviewMode) => {
@@ -1315,8 +1505,7 @@ async function initTrainer(): Promise<void> {
     const { total, reviewed, remaining } = getReviewCounts();
     const index = remaining > 0 ? Math.min(total, reviewed + 1) : reviewed;
     reviewIndexLabel.textContent = `${index} / ${total}`;
-    reviewModeLabel.textContent =
-      reviewMode === "dense_random" ? "Mode: Dense cover" : "Mode: Predictions";
+    reviewModeLabel.textContent = "Mode: Review";
     if (!item) {
       reviewClassLabel.textContent = "Class: --";
       reviewConfidenceLabel.textContent = "Confidence: --";
@@ -1525,18 +1714,18 @@ async function initTrainer(): Promise<void> {
   };
 
   const advanceReviewQueue = () => {
-    if (reviewMode === "predictions") {
+    if (predictionQueue.length > 0) {
       const next = predictionQueue.shift();
       if (next) {
         predictionReviewedCount += 1;
       }
-      updateReviewControls();
-    } else if (reviewMode === "dense_random") {
+    } else {
       const next = denseReviewQueue.shift();
       if (next) {
         denseReviewReviewedCount += 1;
       }
     }
+    updateReviewControls();
     reviewOverrideClass = null;
     currentReviewPatch = null;
     reviewDenseEdit = null;
@@ -1552,11 +1741,8 @@ async function initTrainer(): Promise<void> {
     if (!reviewMode) {
       return;
     }
-    if (reviewMode === "predictions" && predictionQueue.length === 0) {
-      setReviewStatus("Prediction review complete.");
-    }
-    if (reviewMode === "dense_random" && denseReviewQueue.length === 0) {
-      setReviewStatus("Dense cover review complete.");
+    if (predictionQueue.length === 0 && denseReviewQueue.length === 0) {
+      setReviewStatus("Review complete.");
     }
     exitReviewMode();
   };
@@ -1610,40 +1796,34 @@ async function initTrainer(): Promise<void> {
   };
 
   const getReviewCounts = () => {
-    if (reviewMode === "predictions") {
-      return {
-        total: predictionQueueTotal,
-        reviewed: predictionReviewedCount,
-        remaining: predictionQueue.length
-      };
+    if (!reviewMode) {
+      return { total: 0, reviewed: 0, remaining: 0 };
     }
-    if (reviewMode === "dense_random") {
-      return {
-        total: denseReviewTotal,
-        reviewed: denseReviewReviewedCount,
-        remaining: denseReviewQueue.length
-      };
-    }
-    return { total: 0, reviewed: 0, remaining: 0 };
+    return {
+      total: predictionQueueTotal + denseReviewTotal,
+      reviewed: predictionReviewedCount + denseReviewReviewedCount,
+      remaining: predictionQueue.length + denseReviewQueue.length
+    };
   };
 
   const getReviewItemAt = (offset: number): ReviewItem | null => {
-    if (reviewMode === "predictions") {
+    if (!reviewMode) {
+      return null;
+    }
+    if (offset < predictionQueue.length) {
       const prediction = predictionQueue[offset];
       return prediction ? { kind: "prediction", prediction } : null;
     }
-    if (reviewMode === "dense_random") {
-      const item = denseReviewQueue[offset];
-      return item
-        ? {
-            kind: "dense_random",
-            centerLat: item.centerLat,
-            centerLon: item.centerLon,
-            regionId: item.regionId
-          }
-        : null;
-    }
-    return null;
+    const denseIndex = offset - predictionQueue.length;
+    const item = denseReviewQueue[denseIndex];
+    return item
+      ? {
+          kind: "dense_random",
+          centerLat: item.centerLat,
+          centerLon: item.centerLon,
+          regionId: item.regionId
+        }
+      : null;
   };
 
   const getReviewItemKey = (item: ReviewItem): string => {
@@ -1714,10 +1894,16 @@ async function initTrainer(): Promise<void> {
       ctx.fill();
       ctx.stroke();
     } else {
+      const width = 14;
+      const height = 10;
       ctx.beginPath();
-      ctx.arc(patch.sizePx / 2, patch.sizePx / 2, 6, 0, Math.PI * 2);
-      ctx.fillStyle =
-        prediction.class === "billboard" ? COLORS.signBillboard : COLORS.signStop;
+      ctx.rect(
+        patch.sizePx / 2 - width / 2,
+        patch.sizePx / 2 - height / 2,
+        width,
+        height
+      );
+      ctx.fillStyle = COLORS.sign;
       ctx.fill();
       if (typeof prediction.yawDeg === "number") {
         const dir = yawToVector(prediction.yawDeg, 16);
@@ -1957,6 +2143,8 @@ async function initTrainer(): Promise<void> {
       return;
     }
     dataset.regions.forEach((region) => {
+      const row = document.createElement("div");
+      row.className = "trainer-region-row";
       const button = document.createElement("button");
       button.className = "trainer-region-item";
       if (region.id === activeRegionId) {
@@ -1964,8 +2152,37 @@ async function initTrainer(): Promise<void> {
       }
       button.dataset.regionId = region.id;
       button.textContent = `${region.name} (${region.labelingMode})`;
-      regionList.appendChild(button);
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "trainer-region-delete";
+      deleteButton.dataset.regionDelete = region.id;
+      deleteButton.textContent = "Delete";
+      deleteButton.title = `Delete ${region.name}`;
+      row.appendChild(button);
+      row.appendChild(deleteButton);
+      regionList.appendChild(row);
     });
+  };
+
+  const deleteRegion = (regionId: string) => {
+    const region = dataset.regions.find((value) => value.id === regionId);
+    if (!region) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete ${region.name}? This removes all labels and negatives in this region.`
+    );
+    if (!confirmed) {
+      return;
+    }
+    store.update((draft) => {
+      draft.regions = draft.regions.filter((value) => value.id !== regionId);
+      draft.trees = draft.trees.filter((tree) => tree.regionId !== regionId);
+      draft.denseCover = draft.denseCover.filter((label) => label.regionId !== regionId);
+      draft.signs = draft.signs.filter((label) => label.regionId !== regionId);
+      draft.negatives = draft.negatives.filter((negative) => negative.regionId !== regionId);
+    });
+    setDatasetStatus(`Region ${region.name} deleted.`);
   };
 
   const setTool = (tool: Tool) => {
@@ -2065,6 +2282,7 @@ async function initTrainer(): Promise<void> {
   updateDataset(dataset);
   store.subscribe(updateDataset);
   updateMlButtons();
+  void loadMlModel({ notify: false });
   void pollMlManifest();
   window.setInterval(() => {
     void pollMlManifest();
@@ -2086,6 +2304,25 @@ async function initTrainer(): Promise<void> {
     updateTrainingConfig({ patchSizePx: value });
   });
 
+  trainingImageryProvider?.addEventListener("change", () => {
+    const value = trainingImageryProvider.value.trim();
+    if (!value) {
+      return;
+    }
+    updateImageryConfig({ providerId: value });
+  });
+
+  trainingImageryZoom?.addEventListener("input", () => {
+    const value = parseInt(trainingImageryZoom.value, 10);
+    if (!Number.isFinite(value)) {
+      return;
+    }
+    if (trainingImageryZoomValue) {
+      trainingImageryZoomValue.textContent = `${value}`;
+    }
+    updateImageryConfig({ zoom: value });
+  });
+
   trainingTreeZoom?.addEventListener("input", () => {
     const value = parseInt(trainingTreeZoom.value, 10);
     if (!Number.isFinite(value)) {
@@ -2095,6 +2332,14 @@ async function initTrainer(): Promise<void> {
       trainingTreeZoomValue.textContent = `${value}`;
     }
     updateTrainingConfig({ treeZoom: value });
+  });
+
+  trainingTreeContextMultiplier?.addEventListener("change", () => {
+    const value = parseFloat(trainingTreeContextMultiplier.value);
+    if (!Number.isFinite(value)) {
+      return;
+    }
+    updateTrainingConfig({ treeContextRadiusMultiplier: Math.max(0.1, value) });
   });
 
   trainingDenseZoom?.addEventListener("input", () => {
@@ -2153,21 +2398,6 @@ async function initTrainer(): Promise<void> {
     importDatasetInput.value = "";
   });
 
-  trainerSyncToggle?.addEventListener("change", () => {
-    trainerSyncEnabled = trainerSyncToggle.checked;
-    writeTrainerSyncFlag(trainerSyncEnabled);
-    if (!trainerSyncEnabledEnv) {
-      setSyncStatus("Trainer sync disabled. Set VITE_ENABLE_TRAINER_SYNC=1.");
-      return;
-    }
-    if (trainerSyncEnabled) {
-      setSyncStatus("Sync enabled. Waiting for changes...");
-      scheduleRepoSync(dataset, true);
-    } else {
-      setSyncStatus(null);
-    }
-  });
-
   mlReloadButton?.addEventListener("click", () => {
     void loadMlModel({ force: true });
   });
@@ -2186,15 +2416,11 @@ async function initTrainer(): Promise<void> {
   });
 
   startReviewButton?.addEventListener("click", () => {
-    startPredictionReview();
+    void startReview({ autoDetect: true });
   });
 
   clearReviewButton?.addEventListener("click", () => {
     clearPredictionQueue();
-  });
-
-  startDenseReviewButton?.addEventListener("click", () => {
-    startDenseCoverReview();
   });
 
   reviewExitButton?.addEventListener("click", () => {
@@ -2345,6 +2571,14 @@ async function initTrainer(): Promise<void> {
   regionList?.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     if (!target) return;
+    const deleteButton = target.closest<HTMLButtonElement>("[data-region-delete]");
+    if (deleteButton) {
+      const regionId = deleteButton.dataset.regionDelete;
+      if (regionId) {
+        deleteRegion(regionId);
+      }
+      return;
+    }
     const button = target.closest<HTMLButtonElement>("[data-region-id]");
     if (!button) return;
     setActiveRegion(button.dataset.regionId ?? null);
@@ -2367,16 +2601,19 @@ async function initTrainer(): Promise<void> {
       case "D":
         setTool("dense_cover");
         break;
-      case "b":
-      case "B":
-        setTool("sign_billboard");
-        break;
       case "s":
       case "S":
-        setTool("sign_stop");
+        setTool("sign");
         break;
       case "Escape":
         setTool("select");
+        break;
+      case "Enter":
+        if (drawingState?.kind === "polygon") {
+          finalizePolygon(drawingState);
+          drawingState = null;
+          render();
+        }
         break;
       case "Backspace":
       case "Delete":
@@ -2433,7 +2670,18 @@ async function initTrainer(): Promise<void> {
         return;
       }
       const latLon = geoProjector.pixelToLatLon(point.x, point.y);
-      if (drawingState?.kind === "polygon" && drawingState.polygonType === polygonTypeForTool(activeTool)) {
+      if (
+        drawingState?.kind === "polygon" &&
+        drawingState.polygonType === polygonTypeForTool(activeTool)
+      ) {
+        const first = drawingState.points[0];
+        const firstPx = geoProjector.latLonToPixel(first.lat, first.lon);
+        if (drawingState.points.length >= 3 && distancePx(point, firstPx) <= DRAW_CLOSE_THRESHOLD_PX) {
+          finalizePolygon(drawingState);
+          drawingState = null;
+          render();
+          return;
+        }
         drawingState.points.push(latLon);
       } else {
         drawingState = {
@@ -2442,11 +2690,12 @@ async function initTrainer(): Promise<void> {
           points: [latLon]
         };
       }
+      updateStatus();
       render();
       return;
     }
 
-    if (activeTool === "sign_billboard" || activeTool === "sign_stop") {
+    if (activeTool === "sign") {
       if (!activeRegionId) {
         updateStatus();
         return;
@@ -2454,7 +2703,6 @@ async function initTrainer(): Promise<void> {
       const startLatLon = geoProjector.pixelToLatLon(point.x, point.y);
       drawingState = {
         kind: "sign",
-        signType: activeTool === "sign_billboard" ? "billboard" : "stop_sign",
         startPx: point,
         startLatLon,
         currentPx: point
@@ -2585,14 +2833,11 @@ async function initTrainer(): Promise<void> {
     const dragDistance = state.currentPx
       ? distancePx(state.startPx, state.currentPx)
       : 0;
-    const yawDeg =
-      state.signType === "billboard" && dragDistance > 6
-        ? bearingDegrees(state.startLatLon, endLatLon)
-        : undefined;
+    const yawDeg = dragDistance > 6 ? bearingDegrees(state.startLatLon, endLatLon) : undefined;
     const label: SignLabel = {
       id: createId("sign"),
       regionId: activeRegionId,
-      class: state.signType,
+      class: "billboard",
       lat: state.startLatLon.lat,
       lon: state.startLatLon.lon,
       yawDeg,
@@ -2807,13 +3052,7 @@ async function initTrainer(): Promise<void> {
     const sign = selected as SignLabel;
     inspectorBody.innerHTML = `
       <div class="trainer-field">
-        <label>
-          Sign type
-          <select id="inspectSignClass">
-            <option value="billboard">Billboard</option>
-            <option value="stop_sign">Stop sign</option>
-          </select>
-        </label>
+        <label>Billboard</label>
       </div>
       <div class="trainer-field">
         <label>
@@ -2823,20 +3062,8 @@ async function initTrainer(): Promise<void> {
       </div>
       <button class="trainer-delete" id="inspectDelete">Delete</button>
     `;
-    const signClass = document.getElementById("inspectSignClass") as HTMLSelectElement | null;
     const signYaw = document.getElementById("inspectSignYaw") as HTMLInputElement | null;
     const deleteButton = document.getElementById("inspectDelete") as HTMLButtonElement | null;
-    if (signClass) {
-      signClass.value = sign.class;
-      signClass.addEventListener("change", () => {
-        const nextClass = signClass.value === "stop_sign" ? "stop_sign" : "billboard";
-        store.update((draft) => {
-          const target = draft.signs.find((label) => label.id === sign.id);
-          if (!target) return;
-          target.class = nextClass;
-        });
-      });
-    }
     if (signYaw) {
       signYaw.value = sign.yawDeg === undefined ? "" : formatNumber(sign.yawDeg);
       signYaw.addEventListener("change", () => {
@@ -3005,7 +3232,7 @@ async function initTrainer(): Promise<void> {
     return {
       id: createId("sign"),
       regionId,
-      class: prediction.class,
+      class: "billboard",
       lat: prediction.centerLat,
       lon: prediction.centerLon,
       yawDeg: prediction.yawDeg,
@@ -3026,9 +3253,9 @@ async function initTrainer(): Promise<void> {
       case "dense_cover":
         return "Dense cover";
       case "billboard":
-        return "Billboard";
+        return "Billboard sign";
       case "stop_sign":
-        return "Stop sign";
+        return "Billboard sign";
       default:
         return value;
     }
@@ -3183,10 +3410,12 @@ async function initTrainer(): Promise<void> {
   function drawSigns() {
     dataset.signs.forEach((sign) => {
       const center = geoProjector!.latLonToPixel(sign.lat, sign.lon);
+      const width = 14;
+      const height = 10;
       ctx.save();
       ctx.beginPath();
-      ctx.arc(center.x, center.y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = sign.class === "billboard" ? COLORS.signBillboard : COLORS.signStop;
+      ctx.rect(center.x - width / 2, center.y - height / 2, width, height);
+      ctx.fillStyle = COLORS.sign;
       ctx.fill();
       if (typeof sign.yawDeg === "number") {
         const dir = yawToVector(sign.yawDeg, 14);
@@ -3234,8 +3463,10 @@ async function initTrainer(): Promise<void> {
       const sign = dataset.signs.find((label) => label.id === selection.id);
       if (!sign) return;
       const center = projector.latLonToPixel(sign.lat, sign.lon);
+      const width = 18;
+      const height = 14;
       ctx.beginPath();
-      ctx.arc(center.x, center.y, 9, 0, Math.PI * 2);
+      ctx.rect(center.x - width / 2, center.y - height / 2, width, height);
       ctx.stroke();
     }
     ctx.restore();
@@ -3288,8 +3519,15 @@ async function initTrainer(): Promise<void> {
         ctx.stroke();
       }
     } else if (drawingState.kind === "sign") {
+      const width = 14;
+      const height = 10;
       ctx.beginPath();
-      ctx.arc(drawingState.startPx.x, drawingState.startPx.y, 6, 0, Math.PI * 2);
+      ctx.rect(
+        drawingState.startPx.x - width / 2,
+        drawingState.startPx.y - height / 2,
+        width,
+        height
+      );
       ctx.strokeStyle = COLORS.selection;
       ctx.lineWidth = 2;
       ctx.stroke();
@@ -3713,7 +3951,7 @@ async function initTrainer(): Promise<void> {
       "Content-Type": "application/json",
       "X-VisOpti-Trainer": "1"
     };
-    if (trainerSyncEnabled && readTrainerSyncFlag()) {
+    if (trainerSyncEnabled) {
       headers["X-VisOpti-Trainer-Token"] = "1";
     }
     return headers;
@@ -4372,26 +4610,6 @@ async function initTrainer(): Promise<void> {
       if (intersect) inside = !inside;
     }
     return inside;
-  }
-}
-
-function readTrainerSyncFlag(): boolean {
-  try {
-    return window.localStorage.getItem(TRAINER_SYNC_FLAG) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeTrainerSyncFlag(enabled: boolean): void {
-  try {
-    if (enabled) {
-      window.localStorage.setItem(TRAINER_SYNC_FLAG, "1");
-    } else {
-      window.localStorage.removeItem(TRAINER_SYNC_FLAG);
-    }
-  } catch {
-    // Ignore storage failures.
   }
 }
 

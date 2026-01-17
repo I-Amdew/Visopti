@@ -56,7 +56,7 @@ Roads/traffic/buildings live under advanced controls in the control panel: **Mod
 - Exploring blindspots caused by terrain and obstacles before you deploy.
 
 ## License
-This project is released under the MIT License, so you can use it however you want. See [LICENSE](./LICENSE).
+This project is released under the Apache 2.0 License. See [LICENSE](./LICENSE).
 
 ## Planned updates
 - Road-following visibility cones with configurable angular width.

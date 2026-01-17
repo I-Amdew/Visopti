@@ -3,7 +3,7 @@ import { resolve } from "path";
 import { defineConfig, type ViteDevServer } from "vite";
 
 const includeTrainer = process.env.VITE_INCLUDE_TRAINER === "1";
-const enableTrainerSync = process.env.VITE_ENABLE_TRAINER_SYNC === "1";
+const enableTrainerSync = true;
 
 const DATASET_ROOT = resolve(__dirname, "ml/datasets/active");
 const MANIFEST_PATH = resolve(DATASET_ROOT, "manifest.json");

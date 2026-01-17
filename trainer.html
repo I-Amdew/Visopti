@@ -10,10 +10,16 @@
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       crossorigin=""
     />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Sans+3:wght@400;500;600&display=swap"
+    />
     <link rel="stylesheet" href="/styles.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   </head>
-  <body>
+  <body class="trainer-ui">
     <div id="trainerDisabled" class="trainer-disabled hidden">Not enabled.</div>
     <div id="app" class="trainer-app">
       <div id="workspace">
@@ -22,9 +28,17 @@
       </div>
 
       <section id="controls">
-        <h2>ML Trainer</h2>
+        <header class="trainer-header">
+          <div>
+            <div class="trainer-eyebrow">Visopti Lab</div>
+            <h2>Trainer Console</h2>
+            <p class="trainer-subtitle">Label, review, and export datasets for the tree + sign models.</p>
+          </div>
+          <div class="trainer-status-pill">Dataset v2</div>
+        </header>
         <div class="panel trainer-panel">
           <h3>Target Region</h3>
+          <p class="trainer-panel-note">Define regions that map directly to trainer dataset entries.</p>
           <div class="trainer-toolbar">
             <button class="trainer-button" data-tool="new_region" id="toolNewRegion">
               New Region
@@ -44,6 +58,7 @@
         </div>
         <div class="panel trainer-panel">
           <h3>Labeling</h3>
+          <p class="trainer-panel-note">Pine + deciduous trees, dense cover polygons, and billboard signs.</p>
           <div class="trainer-toolbar">
             <button class="trainer-button is-active" data-tool="select" id="toolSelect">
               Select (Esc)
@@ -57,11 +72,8 @@
             <button class="trainer-button" data-tool="dense_cover" id="toolDenseCover">
               Dense Cover (D)
             </button>
-            <button class="trainer-button" data-tool="sign_billboard" id="toolBillboard">
-              Add Billboard (B)
-            </button>
-            <button class="trainer-button" data-tool="sign_stop" id="toolStopSign">
-              Add Stop Sign (S)
+            <button class="trainer-button" data-tool="sign" id="toolSign">
+              Add Billboard (S)
             </button>
           </div>
           <label class="toggle-option">
@@ -71,7 +83,32 @@
           <div id="trainerStatus" class="status-line">Select a tool to begin.</div>
         </div>
         <div class="panel trainer-panel">
-          <h3>Training Zones</h3>
+          <h3>Imagery + Sampling</h3>
+          <p class="trainer-panel-note">These settings drive patch generation and model review context.</p>
+          <div class="trainer-field">
+            <label>
+              Imagery provider
+              <input
+                type="text"
+                id="trainingImageryProvider"
+                list="trainingImageryProviders"
+                placeholder="esri_world_imagery"
+              />
+            </label>
+            <datalist id="trainingImageryProviders">
+              <option value="esri_world_imagery">Satellite (Esri)</option>
+              <option value="satellite">Satellite (generic)</option>
+              <option value="autoStreet">Auto Street (OSM)</option>
+              <option value="street">Street (OSM)</option>
+            </datalist>
+          </div>
+          <div class="trainer-field">
+            <label>
+              Imagery zoom
+              <input type="range" min="16" max="20" step="1" id="trainingImageryZoom" />
+              <span id="trainingImageryZoomValue">19</span>
+            </label>
+          </div>
           <div class="trainer-field">
             <label>
               Patch size (px)
@@ -87,6 +124,12 @@
               Tree zoom
               <input type="range" min="16" max="22" step="1" id="trainingTreeZoom" />
               <span id="trainingTreeZoomValue">20</span>
+            </label>
+          </div>
+          <div class="trainer-field">
+            <label>
+              Tree context radius (x crown)
+              <input type="number" min="0.5" step="0.1" id="trainingTreeContextMultiplier" />
             </label>
           </div>
           <div class="trainer-field">
@@ -132,12 +175,13 @@
             <span id="trainerDenseCoverCount">0</span>
           </div>
           <div class="value-row">
-            <span>Signs</span>
+            <span>Billboards</span>
             <span id="trainerSignCount">0</span>
           </div>
         </div>
         <div class="panel trainer-panel">
           <h3>Dataset</h3>
+          <p class="trainer-panel-note">Export bundles include samples, annotations, and trainer state.</p>
           <div class="value-row">
             <span>Total trees labeled</span>
             <span id="trainerDatasetTreeTotal">0</span>
@@ -161,10 +205,6 @@
             Import dataset.json
             <input type="file" id="trainerImportDataset" accept="application/json" />
           </label>
-          <label class="toggle-option">
-            <input type="checkbox" id="trainerSyncToggle" />
-            Sync dataset to repo (dev)
-          </label>
           <div id="trainerSyncStatus" class="status-line hidden"></div>
           <div id="trainerDatasetStatus" class="status-line hidden"></div>
           <div id="trainerExportProgress" class="progress-row hidden">
@@ -186,11 +226,7 @@
               </div>
               <div class="value-row">
                 <span>Billboard samples</span>
-                <span id="trainerAnalyticsBillboard">0</span>
-              </div>
-              <div class="value-row">
-                <span>Stop sign samples</span>
-                <span id="trainerAnalyticsStop">0</span>
+                <span id="trainerAnalyticsSigns">0</span>
               </div>
               <div class="value-row">
                 <span>Negative samples</span>
@@ -230,7 +266,8 @@
           </div>
         </div>
         <div class="panel trainer-panel">
-          <h3>ML Predictions</h3>
+          <h3>Model Assist</h3>
+          <p class="trainer-panel-note">Run the current tree/sign model against the visible map.</p>
           <div class="value-row">
             <span>Model version</span>
             <span id="trainerMlVersion">--</span>
@@ -243,6 +280,7 @@
         </div>
         <div class="panel trainer-panel">
           <h3>Review</h3>
+          <p class="trainer-panel-note">Queue predictions and dense cover samples for review.</p>
           <label class="import-label">
             Import predictions JSON
             <input type="file" id="trainerImportPredictions" accept="application/json" />
@@ -255,15 +293,11 @@
             <button class="trainer-button" id="trainerStartReview">Start review</button>
             <button class="trainer-button" id="trainerClearReview">Clear queue</button>
           </div>
-          <div class="trainer-toolbar">
-            <button class="trainer-button" id="trainerStartDenseReview">
-              Start dense cover review
-            </button>
-          </div>
           <div id="trainerReviewStatus" class="status-line hidden"></div>
         </div>
         <div class="panel trainer-panel">
           <h3>Inspect/Edit</h3>
+          <p class="trainer-panel-note">Edit label details and apply exact radii or yaw values.</p>
           <div id="trainerInspectorEmpty" class="status-line">Select a label to inspect.</div>
           <div id="trainerInspectorBody" class="trainer-inspector hidden"></div>
         </div>
@@ -279,7 +313,7 @@
             </div>
             <div class="value-row">
               <span id="trainerReviewClass">Class: --</span>
-              <span id="trainerReviewModeLabel">Mode: Predictions</span>
+              <span id="trainerReviewModeLabel">Mode: Review</span>
             </div>
           </div>
           <div class="trainer-review-canvas-wrap">

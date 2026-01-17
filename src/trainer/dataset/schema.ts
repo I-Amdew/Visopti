@@ -156,7 +156,7 @@ function normalizeDataset(input: Partial<TrainerDataset>): TrainerDataset {
     regions: Array.isArray(input.regions) ? input.regions : [],
     trees: Array.isArray(input.trees) ? input.trees : [],
     denseCover: normalizeDenseCover(input.denseCover),
-    signs: Array.isArray(input.signs) ? input.signs : [],
+    signs: normalizeSigns(input.signs),
     negatives: Array.isArray(input.negatives) ? input.negatives : [],
     samples: normalizeSamples(input.samples),
     reviews: normalizeReviews(input.reviews)
@@ -221,6 +221,18 @@ function normalizeDenseCover(input: unknown): DenseCoverLabel[] {
         typeof label.edgeBandMeters === "number" && Number.isFinite(label.edgeBandMeters)
           ? label.edgeBandMeters
           : undefined
+    }));
+}
+
+function normalizeSigns(input: unknown): SignLabel[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input
+    .filter((value): value is SignLabel => Boolean(value && typeof value === "object"))
+    .map((sign) => ({
+      ...sign,
+      class: sign.class === "stop_sign" ? "billboard" : sign.class
     }));
 }
 
