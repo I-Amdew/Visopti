@@ -4,10 +4,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "trainer": "vite --open /trainer.html?trainer=1",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "ml:convert:yolo": "node ml/scripts/convert_visopti_zip_to_yolo.js <zipPath> <outDir>",
+    "ml:train": "python3 ml/train_treesigns.py",
+    "ml:train:win": "py -3 ml\\train_treesigns.py",
     "elevation:probe": "node scripts/elevation_rate_limit_test.js"
   },
   "devDependencies": {
@@ -17,6 +21,8 @@
     "vitest": "^4.0.16"
   },
   "dependencies": {
+    "fflate": "^0.8.2",
+    "onnxruntime-web": "^1.23.2",
     "three": "^0.182.0"
   }
 }

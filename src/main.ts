@@ -10,6 +10,7 @@ import { createThreeView, type TrafficFlowData, type ThreeViewMode } from "./thr
 import {
   AppSettings,
   Building,
+  DenseCover,
   GeoBounds,
   GeoProjector,
   MapPoint,
@@ -20,6 +21,7 @@ import {
   Sign,
   SignHeightSource,
   SignKind,
+  FacePriorityArc,
   StructureParams,
   TrafficSignal,
   TrafficByHour,
@@ -56,9 +58,7 @@ import {
   buildCombinedHeightGrid,
   buildTrafficViewerSamples,
   computeVisibilityHeatmap,
-  computeShadingOverlay,
   sampleCandidatePoints,
-  sampleMapGridPoints,
   sampleViewerPoints
 } from "./visibility";
 import { generateContourSegments } from "./contours";
@@ -66,17 +66,24 @@ import { getTileSource, TileSourceId, TILE_SOURCES, renderMapFrameImage } from "
 import { createMapView } from "./mapView";
 import { fetchElevationGrid } from "./topography";
 import { fetchOsmRoadsAndBuildings } from "./osm/overpass";
-import { buildLabelDataset, buildPredictionFeatures, parseLabelDataset } from "./ml/labels";
+import { buildLabelDataset, buildPredictionFeatures, parseLabelDataset, type LabelDataset } from "./ml/labels";
+import { detectOnPatch, loadTreeSignsModel, type PatchPrediction } from "./ml/inference";
 import { deserializeProject, RuntimeProjectState, serializeProject } from "./project";
 import { createStructurePreview } from "./structurePreview";
 import { createStructureEditor, type StructureEditorState, type StructureFrameInfo } from "./structureEditor";
 import {
-  buildRectFootprintTemplate,
+  buildPolygonFootprintTemplate,
   computeStructureFaces,
   labelFaceDirection,
+  resolveFacePriorityIndices,
   optimizeStructurePlacement,
   type StructureOptimizationResult
 } from "./structureOptimizer";
+import { renderPatchImage } from "./trainer/export";
+import {
+  resolveStructureFootprintPoints,
+  resolveStructureRotationDeg
+} from "./structureFootprint";
 import type {
   Building as OsmBuilding,
   Road as OsmRoad,
@@ -97,6 +104,12 @@ import {
   type WorkflowState
 } from "./workflowState";
 import { buildWorldModelFromProject, type WorldModel } from "./world/worldModel";
+import {
+  applyBuildingHeightEstimates,
+  getDefaultBuildingHeightProviders,
+  resolveBuildingHeightInfo,
+  resolveBuildingHeights
+} from "./world/height";
 
 type MapViewInstance = ReturnType<typeof createMapView>;
 type BasemapMode = TileSourceId;
@@ -189,15 +202,20 @@ const AUTOSAVE_KEY = "visopti-autosave-v1";
 const DEFAULT_CUSTOM_TRAFFIC_CAPACITY = 1200;
 const EXTRA_KEY = "__visopti";
 const FEET_TO_METERS = 0.3048;
+const METERS_TO_FEET = 1 / FEET_TO_METERS;
 const METERS_PER_MILE = 1609.344;
 const SIM_BUFFER_MILES = 5;
 const SIM_BUFFER_METERS = SIM_BUFFER_MILES * METERS_PER_MILE;
+const TRAFFIC_MAX_GRAPH_EDGES = 120000;
 const TOPO_MIN_COVERAGE_ENABLE = 0.15;
 const TOPO_APPROX_COVERAGE = 0.85;
 const TOPO_PROGRESS_THROTTLE_MS = 100;
 const TRAFFIC_HOUR_MIN = 6;
 const TRAFFIC_HOUR_MAX = 20;
 const RUSH_WINDOW_HALF_SPAN = 1;
+const ML_PATCH_OVERLAP = 0.35;
+const ML_PATCH_THROTTLE_MS = 60;
+const ML_NMS_IOU = 0.45;
 
 function isDebugModeEnabled(): boolean {
   if (typeof window === "undefined") {
@@ -299,18 +317,42 @@ async function init() {
   const structureEditorCanvas = document.getElementById(
     "structureEditorCanvas"
   ) as HTMLCanvasElement | null;
-  const structureEditorWidth = document.getElementById(
-    "structureEditorWidth"
+  const structureEditorHeight = document.getElementById(
+    "structureEditorHeight"
   ) as HTMLInputElement | null;
-  const structureEditorLength = document.getElementById(
-    "structureEditorLength"
+  const structureEditorHeightSlider = document.getElementById(
+    "structureEditorHeightSlider"
   ) as HTMLInputElement | null;
   const structureEditorRotation = document.getElementById(
     "structureEditorRotation"
   ) as HTMLInputElement | null;
-  const structureEditorWidthValue = document.getElementById("structureEditorWidthValue");
-  const structureEditorLengthValue = document.getElementById("structureEditorLengthValue");
+  const structureEditorPerimeterValue = document.getElementById(
+    "structureEditorPerimeterValue"
+  );
   const structureEditorAreaValue = document.getElementById("structureEditorAreaValue");
+  const structureEditorFrontEdgeValue = document.getElementById(
+    "structureEditorFrontEdgeValue"
+  );
+  const structureEditorTabButtons = structureEditorModal
+    ? Array.from(
+        structureEditorModal.querySelectorAll<HTMLButtonElement>("[data-structure-tab]")
+      )
+    : null;
+  const structureEditorTabPanels = structureEditorModal
+    ? Array.from(
+        structureEditorModal.querySelectorAll<HTMLElement>("[data-structure-panel]")
+      )
+    : null;
+  const structureEditorToolButtons = structureEditorModal
+    ? Array.from(
+        structureEditorModal.querySelectorAll<HTMLButtonElement>("[data-mode]")
+      )
+    : null;
+  const structureEditorArcButtons = structureEditorModal
+    ? Array.from(
+        structureEditorModal.querySelectorAll<HTMLButtonElement>("[data-arc]")
+      )
+    : null;
   const structureEditorClose = document.getElementById(
     "structureEditorClose"
   ) as HTMLButtonElement | null;
@@ -320,9 +362,30 @@ async function init() {
   const structureEditorApply = document.getElementById(
     "structureEditorApply"
   ) as HTMLButtonElement | null;
-  const btnOptimizeStructure = document.getElementById(
-    "btnOptimizeStructure"
+  const structureEditorImportFile = document.getElementById(
+    "structureEditorImportFile"
+  ) as HTMLInputElement | null;
+  const structureEditorImportName = document.getElementById("structureEditorImportName");
+  const structureEditorImportFormat = document.getElementById("structureEditorImportFormat");
+  const structureEditorImportScale = document.getElementById(
+    "structureEditorImportScale"
+  ) as HTMLInputElement | null;
+  const structureEditorImportRotation = document.getElementById(
+    "structureEditorImportRotation"
+  ) as HTMLInputElement | null;
+  const structureEditorImportOffsetX = document.getElementById(
+    "structureEditorImportOffsetX"
+  ) as HTMLInputElement | null;
+  const structureEditorImportOffsetY = document.getElementById(
+    "structureEditorImportOffsetY"
+  ) as HTMLInputElement | null;
+  const structureEditorImportOffsetZ = document.getElementById(
+    "structureEditorImportOffsetZ"
+  ) as HTMLInputElement | null;
+  const structureEditorGenerateProxy = document.getElementById(
+    "structureEditorGenerateProxy"
   ) as HTMLButtonElement | null;
+  const structureEditorProxyStatus = document.getElementById("structureEditorProxyStatus");
   const structureSquareToRoad = document.getElementById(
     "structureSquareToRoad"
   ) as HTMLInputElement | null;
@@ -335,6 +398,17 @@ async function init() {
   const btnAddCandidate = document.getElementById("btnAddCandidate") as HTMLButtonElement | null;
   const candidateItems = document.getElementById("candidateItems");
   const candidateCount = document.getElementById("candidateCount");
+  const btnRunOptimization = document.getElementById(
+    "btnRunOptimization"
+  ) as HTMLButtonElement | null;
+  const optimizationProgress = document.getElementById("optimizationProgress");
+  const optimizationProgressLabel = document.getElementById("optimizationProgressLabel");
+  const optimizationProgressBar = document.getElementById(
+    "optimizationProgressBar"
+  ) as HTMLProgressElement | null;
+  const btnCancelOptimization = document.getElementById(
+    "btnCancelOptimization"
+  ) as HTMLButtonElement | null;
   const layerRoads = document.getElementById("layerRoads") as HTMLInputElement | null;
   const layerBuildings = document.getElementById("layerBuildings") as HTMLInputElement | null;
   const layerTrees = document.getElementById("layerTrees") as HTMLInputElement | null;
@@ -354,9 +428,10 @@ async function init() {
   const inspectFeatureLabel = document.getElementById("inspectFeatureLabel");
   const inspectBuildingDetails = document.getElementById("inspectBuildingDetails");
   const inspectBuildingId = document.getElementById("inspectBuildingId");
+  const inspectEffectiveHeight = document.getElementById("inspectEffectiveHeight");
   const inspectInferredHeight = document.getElementById("inspectInferredHeight");
   const inspectHeightSource = document.getElementById("inspectHeightSource");
-  const inspectHeightMeters = document.getElementById("inspectHeightMeters") as HTMLInputElement | null;
+  const inspectHeightConfidence = document.getElementById("inspectHeightConfidence");
   const inspectHeightFeet = document.getElementById("inspectHeightFeet") as HTMLInputElement | null;
   const inspectResetHeight = document.getElementById(
     "inspectResetHeight"
@@ -399,8 +474,14 @@ async function init() {
   const importPredictionsFile = document.getElementById(
     "importPredictionsFile"
   ) as HTMLInputElement | null;
+  const importMlTreesFile = document.getElementById(
+    "importMlTreesFile"
+  ) as HTMLInputElement | null;
   const btnClearPredictions = document.getElementById(
     "btnClearPredictions"
+  ) as HTMLButtonElement | null;
+  const btnDetectMlFrame = document.getElementById(
+    "btnDetectMlFrame"
   ) as HTMLButtonElement | null;
   const labelStatus = document.getElementById("labelStatus");
   const customRoadControls = document.getElementById("customRoadControls");
@@ -492,16 +573,29 @@ async function init() {
     !structurePreviewCanvas ||
     !structureEditorModal ||
     !structureEditorCanvas ||
-    !structureEditorWidth ||
-    !structureEditorLength ||
+    !structureEditorHeight ||
+    !structureEditorHeightSlider ||
     !structureEditorRotation ||
-    !structureEditorWidthValue ||
-    !structureEditorLengthValue ||
+    !structureEditorPerimeterValue ||
     !structureEditorAreaValue ||
+    !structureEditorFrontEdgeValue ||
+    !structureEditorTabButtons ||
+    !structureEditorTabPanels ||
+    !structureEditorToolButtons ||
+    !structureEditorArcButtons ||
     !structureEditorClose ||
     !structureEditorCancel ||
     !structureEditorApply ||
-    !btnOptimizeStructure ||
+    !structureEditorImportFile ||
+    !structureEditorImportName ||
+    !structureEditorImportFormat ||
+    !structureEditorImportScale ||
+    !structureEditorImportRotation ||
+    !structureEditorImportOffsetX ||
+    !structureEditorImportOffsetY ||
+    !structureEditorImportOffsetZ ||
+    !structureEditorGenerateProxy ||
+    !structureEditorProxyStatus ||
     !structureSquareToRoad ||
     !structureFacePriority ||
     !structureBestScore ||
@@ -509,6 +603,15 @@ async function init() {
     !structureFaceScores
   ) {
     throw new Error("Structure controls missing from DOM");
+  }
+  if (
+    !btnRunOptimization ||
+    !optimizationProgress ||
+    !optimizationProgressLabel ||
+    !optimizationProgressBar ||
+    !btnCancelOptimization
+  ) {
+    throw new Error("Optimization controls missing from DOM");
   }
   if (
     !layerRoads ||
@@ -526,9 +629,10 @@ async function init() {
     !inspectFeatureLabel ||
     !inspectBuildingDetails ||
     !inspectBuildingId ||
+    !inspectEffectiveHeight ||
     !inspectInferredHeight ||
     !inspectHeightSource ||
-    !inspectHeightMeters ||
+    !inspectHeightConfidence ||
     !inspectHeightFeet ||
     !inspectResetHeight ||
     !inspectTreeDetails ||
@@ -630,16 +734,17 @@ async function init() {
   const structurePreviewCanvasEl = structurePreviewCanvas;
   const structureEditorModalEl = structureEditorModal;
   const structureEditorCanvasEl = structureEditorCanvas;
-  const structureEditorWidthEl = structureEditorWidth;
-  const structureEditorLengthEl = structureEditorLength;
+  const structureEditorHeightEl = structureEditorHeight;
+  const structureEditorHeightSliderEl = structureEditorHeightSlider;
   const structureEditorRotationEl = structureEditorRotation;
-  const structureEditorWidthValueEl = structureEditorWidthValue;
-  const structureEditorLengthValueEl = structureEditorLengthValue;
+  const structureEditorPerimeterValueEl = structureEditorPerimeterValue;
   const structureEditorAreaValueEl = structureEditorAreaValue;
+  const structureEditorFrontEdgeValueEl = structureEditorFrontEdgeValue;
+  const structureEditorToolButtonsEl = structureEditorToolButtons;
+  const structureEditorArcButtonsEl = structureEditorArcButtons;
   const structureEditorCloseEl = structureEditorClose;
   const structureEditorCancelEl = structureEditorCancel;
   const structureEditorApplyEl = structureEditorApply;
-  const btnOptimizeStructureEl = btnOptimizeStructure;
   const structureSquareToRoadEl = structureSquareToRoad;
   const structureFacePriorityEl = structureFacePriority;
   const structureBestScoreEl = structureBestScore;
@@ -647,6 +752,11 @@ async function init() {
   const structureFaceScoresEl = structureFaceScores;
   const candidateItemsEl = candidateItems;
   const candidateCountEl = candidateCount;
+  const btnRunOptimizationEl = btnRunOptimization;
+  const optimizationProgressEl = optimizationProgress;
+  const optimizationProgressLabelEl = optimizationProgressLabel;
+  const optimizationProgressBarEl = optimizationProgressBar;
+  const btnCancelOptimizationEl = btnCancelOptimization;
   const layerRoadsEl = layerRoads;
   const layerBuildingsEl = layerBuildings;
   const layerTreesEl = layerTrees;
@@ -662,9 +772,10 @@ async function init() {
   const inspectFeatureLabelEl = inspectFeatureLabel;
   const inspectBuildingDetailsEl = inspectBuildingDetails;
   const inspectBuildingIdEl = inspectBuildingId;
+  const inspectEffectiveHeightEl = inspectEffectiveHeight;
   const inspectInferredHeightEl = inspectInferredHeight;
   const inspectHeightSourceEl = inspectHeightSource;
-  const inspectHeightMetersEl = inspectHeightMeters;
+  const inspectHeightConfidenceEl = inspectHeightConfidence;
   const inspectHeightFeetEl = inspectHeightFeet;
   const inspectResetHeightEl = inspectResetHeight;
   const inspectTreeDetailsEl = inspectTreeDetails;
@@ -688,6 +799,7 @@ async function init() {
   const toggleLabelingModeEl = toggleLabelingMode;
   const btnExportLabelsEl = btnExportLabels;
   const importPredictionsFileEl = importPredictionsFile;
+  const importMlTreesFileEl = importMlTreesFile;
   const btnClearPredictionsEl = btnClearPredictions;
   const labelStatusEl = labelStatus;
   const customRoadControlsEl = customRoadControls;
@@ -760,7 +872,7 @@ async function init() {
   let structureBaseElevationM = 0;
   let structureOverlay: StructureOverlayData | null = null;
   let structureAnalysis: StructureOptimizationResult | null = null;
-  let pinnedFaceId: number | null = null;
+  let facePriority: FacePriorityArc | null = null;
   const frameOverlay = createFrameOverlay(mapView.getLeafletMap(), {
     minSideM: settings.frame.minSideFt * FEET_TO_METERS,
     maxSideM: settings.frame.maxSideFt * FEET_TO_METERS,
@@ -793,9 +905,11 @@ async function init() {
     importedAt: null,
     sourceLabel: null
   };
+  let mlDetecting = false;
   let customRoads: Road[] = [];
   let trees: Tree[] = [];
   let signs: Sign[] = [];
+  let denseCover: DenseCover[] = [];
   let selectedRoadId: string | null = null;
   let selectedShapeId: string | null = null;
   let worldModel: WorldModel | null = null;
@@ -821,6 +935,7 @@ async function init() {
   let trafficBaseByRoadId: TrafficByRoadId | null = null;
   let trafficOverlayByRoadId: TrafficByRoadId = {};
   let trafficMeta: TrafficSimResult["meta"] | null = null;
+  let trafficGraphCapMessage: string | null = null;
   let trafficEpicenters: TrafficSimResult["epicenters"] | null = null;
   let trafficEdgeTraffic: TrafficSimResult["edgeTraffic"] | null = null;
   let trafficViewerSamples: TrafficSimResult["viewerSamples"] | null = null;
@@ -829,6 +944,13 @@ async function init() {
   let visibilityComputing = false;
   let trafficRunId = 0;
   let activeTrafficRunId = 0;
+  let optimizationInFlight = false;
+  let optimizationAbortController: AbortController | null = null;
+  let optimizationPhase: "idle" | "preparing" | "traffic" | "heatmap" | "optimize" | "done" =
+    "idle";
+  let optimizationDoneTimer: number | null = null;
+  let trafficSignature: string | null = null;
+  let trafficRunListeners: Array<(outcome: { ok: boolean; message?: string }) => void> = [];
   let autoFetchController: AbortController | null = null;
   let geocodeController: AbortController | null = null;
   let lastPointer: { x: number; y: number } | null = null;
@@ -876,6 +998,22 @@ async function init() {
     },
     onFeatureMoved: (request) => {
       handleFeatureMoved(request);
+    },
+    onDenseCoverCreated: (request) => {
+      const next: DenseCover = {
+        id: crypto.randomUUID?.() ?? `dense-${Date.now()}`,
+        polygonLatLon: request.polygon.map((point) => ({ ...point })),
+        density: request.density,
+        mode: "dense_cover"
+      };
+      denseCover = [...denseCover, next];
+      updateWorldModel();
+      scheduleAutosave();
+    },
+    onDenseCoverDeleted: (id) => {
+      denseCover = denseCover.filter((item) => item.id !== id);
+      updateWorldModel();
+      scheduleAutosave();
     }
   });
   drawingManager.setRoadDirectionOverlayEnabled(true);
@@ -939,31 +1077,61 @@ async function init() {
   };
   const structurePreview = createStructurePreview(structurePreviewCanvasEl);
   const updateStructurePreview = () => {
+    const footprint = resolveStructureFootprintPoints(structure);
     structurePreview.setStructure({
-      widthM: Math.max(1, structure.footprint.widthFt) * FEET_TO_METERS,
-      lengthM: Math.max(1, structure.footprint.lengthFt) * FEET_TO_METERS,
-      heightM: Math.max(1, structure.heightFt) * FEET_TO_METERS,
+      footprint: footprint.map((point) => ({ ...point })),
+      heightM: Math.max(1, structure.heightMeters),
       baseM: structureBaseElevationM
     });
   };
   const structureEditor = createStructureEditor({
     modal: structureEditorModalEl,
     canvas: structureEditorCanvasEl,
-    widthInput: structureEditorWidthEl,
-    lengthInput: structureEditorLengthEl,
     rotationInput: structureEditorRotationEl,
-    widthValue: structureEditorWidthValueEl,
-    lengthValue: structureEditorLengthValueEl,
+    heightInput: structureEditorHeightEl,
+    heightSlider: structureEditorHeightSliderEl,
+    perimeterValue: structureEditorPerimeterValueEl,
     areaValue: structureEditorAreaValueEl,
+    frontEdgeValue: structureEditorFrontEdgeValueEl,
+    tabButtons: structureEditorTabButtons,
+    tabPanels: structureEditorTabPanels,
+    toolButtons: structureEditorToolButtonsEl,
+    arcButtons: structureEditorArcButtonsEl,
+    importFileInput: structureEditorImportFile,
+    importNameValue: structureEditorImportName,
+    importFormatValue: structureEditorImportFormat,
+    importScaleInput: structureEditorImportScale,
+    importRotationInput: structureEditorImportRotation,
+    importOffsetXInput: structureEditorImportOffsetX,
+    importOffsetYInput: structureEditorImportOffsetY,
+    importOffsetZInput: structureEditorImportOffsetZ,
+    importGenerateProxyButton: structureEditorGenerateProxy,
+    importProxyStatus: structureEditorProxyStatus,
     closeButton: structureEditorCloseEl,
     cancelButton: structureEditorCancelEl,
     applyButton: structureEditorApplyEl,
     onApply: (next) => {
-      structure.footprint.widthFt = next.widthFt;
-      structure.footprint.lengthFt = next.lengthFt;
+      structure.mode = next.mode;
+      structure.footprint.points = next.footprintPoints.map((point) => ({ ...point }));
+      structure.heightMeters = next.heightMeters;
       structure.centerPx = { ...next.centerPx };
       structure.rotationDeg = next.rotationDeg;
       structure.placeAtCenter = next.placeAtCenter;
+      structure.facePriority = next.facePriority;
+      structure.imported = next.imported
+        ? {
+            ...next.imported,
+            offset: { ...next.imported.offset },
+            footprintProxy: next.imported.footprintProxy
+              ? {
+                  points: next.imported.footprintProxy.points.map((point) => ({ ...point }))
+                }
+              : undefined
+          }
+        : undefined;
+      facePriority = structure.facePriority ?? null;
+      structure.legacyWidthFt = undefined;
+      structure.legacyLengthFt = undefined;
       refreshStructureInputs(structure);
       updateStructurePreview();
       updateStructureRender();
@@ -974,11 +1142,24 @@ async function init() {
     const frameInfo = getStructureFrameInfo();
     syncStructureCenterToFrame(frameInfo);
     const editorState: StructureEditorState = {
+      mode: structure.mode,
       centerPx: { ...structure.centerPx },
-      widthFt: structure.footprint.widthFt,
-      lengthFt: structure.footprint.lengthFt,
+      footprintPoints: structure.footprint.points.map((point) => ({ ...point })),
+      heightMeters: structure.heightMeters,
       rotationDeg: structure.rotationDeg,
-      placeAtCenter: structure.placeAtCenter
+      placeAtCenter: structure.placeAtCenter,
+      facePriority: structure.facePriority ? { ...structure.facePriority } : undefined,
+      imported: structure.imported
+        ? {
+            ...structure.imported,
+            offset: { ...structure.imported.offset },
+            footprintProxy: structure.imported.footprintProxy
+              ? {
+                  points: structure.imported.footprintProxy.points.map((point) => ({ ...point }))
+                }
+              : undefined
+          }
+        : undefined
     };
     structureEditor.open(editorState, frameInfo);
   };
@@ -1017,38 +1198,28 @@ async function init() {
   const buildStructureRenderData = (
     frameInfo: StructureFrameInfo
   ): StructureRenderData | null => {
-    const widthM = Math.max(1, structure.footprint.widthFt) * FEET_TO_METERS;
-    const lengthM = Math.max(1, structure.footprint.lengthFt) * FEET_TO_METERS;
-    const heightM = Math.max(1, structure.heightFt) * FEET_TO_METERS;
+    const footprint = resolveStructureFootprintPoints(structure);
+    if (footprint.length < 3) {
+      return null;
+    }
+    const heightM = Math.max(1, structure.heightMeters);
     const pixelsPerMeterX = frameInfo.widthPx / frameInfo.widthM;
     const pixelsPerMeterY = frameInfo.heightPx / frameInfo.heightM;
     if (!Number.isFinite(pixelsPerMeterX) || !Number.isFinite(pixelsPerMeterY)) {
       return null;
     }
-    const halfWidth = (widthM * pixelsPerMeterX) / 2;
-    const halfLength = (lengthM * pixelsPerMeterY) / 2;
-    const angle = (structure.rotationDeg * Math.PI) / 180;
-    const axisX = { x: Math.cos(angle), y: Math.sin(angle) };
-    const axisY = { x: -Math.sin(angle), y: Math.cos(angle) };
+    const angle = (resolveStructureRotationDeg(structure) * Math.PI) / 180;
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
     const center = structure.centerPx;
-    const points = [
-      {
-        x: center.x + axisX.x * -halfWidth + axisY.x * -halfLength,
-        y: center.y + axisX.y * -halfWidth + axisY.y * -halfLength
-      },
-      {
-        x: center.x + axisX.x * halfWidth + axisY.x * -halfLength,
-        y: center.y + axisX.y * halfWidth + axisY.y * -halfLength
-      },
-      {
-        x: center.x + axisX.x * halfWidth + axisY.x * halfLength,
-        y: center.y + axisX.y * halfWidth + axisY.y * halfLength
-      },
-      {
-        x: center.x + axisX.x * -halfWidth + axisY.x * halfLength,
-        y: center.y + axisX.y * -halfWidth + axisY.y * halfLength
-      }
-    ];
+    const points = footprint.map((point) => {
+      const scaledX = point.x * pixelsPerMeterX;
+      const scaledY = point.y * pixelsPerMeterY;
+      return {
+        x: center.x + scaledX * cosA - scaledY * sinA,
+        y: center.y + scaledX * sinA + scaledY * cosA
+      };
+    });
     return { points, heightM };
   };
   const updateStructureRender = (frameOverride?: StructureFrameInfo | null) => {
@@ -1079,7 +1250,8 @@ async function init() {
 
     if (!points || points.length < 3) {
       structureFacePriorityEl.disabled = true;
-      pinnedFaceId = null;
+      facePriority = null;
+      structure.facePriority = undefined;
       structureFacePriorityEl.value = "";
       return;
     }
@@ -1098,10 +1270,12 @@ async function init() {
       structureFacePriorityEl.appendChild(option);
     }
     structureFacePriorityEl.disabled = false;
-    if (pinnedFaceId !== null && faces.some((face) => face.id === pinnedFaceId)) {
-      structureFacePriorityEl.value = pinnedFaceId.toString();
+    const primaryEdgeIndex = facePriority?.primaryEdgeIndex;
+    if (primaryEdgeIndex !== undefined && faces.some((face) => face.id === primaryEdgeIndex)) {
+      structureFacePriorityEl.value = primaryEdgeIndex.toString();
     } else {
-      pinnedFaceId = null;
+      facePriority = null;
+      structure.facePriority = undefined;
       structureFacePriorityEl.value = "";
     }
   }
@@ -1126,10 +1300,13 @@ async function init() {
     structureBestRotationEl.textContent = formatRotation(result.placement.rotationDeg);
     structureFaceScoresEl.textContent = "";
     const sorted = [...result.placement.faceScores].sort((a, b) => b.score - a.score);
+    const prioritizedIds = new Set(
+      resolveFacePriorityIndices(result.placement.faceScores.length, facePriority)
+    );
     for (const entry of sorted) {
       const row = document.createElement("div");
       row.className = "structure-face-row";
-      if (pinnedFaceId !== null && entry.face.id === pinnedFaceId) {
+      if (prioritizedIds.has(entry.face.id)) {
         row.classList.add("is-pinned");
       }
       const label = document.createElement("span");
@@ -1147,6 +1324,55 @@ async function init() {
     structureOverlay = null;
     drawingManager.setStructureOverlay(null);
     updateStructureAnalysisUI(null);
+  };
+
+  const optimizationProgressRanges = {
+    preparing: { start: 0.05, end: 0.15 },
+    traffic: { start: 0.15, end: 0.45 },
+    heatmap: { start: 0.45, end: 0.75 },
+    optimize: { start: 0.75, end: 0.95 },
+    done: { start: 0.95, end: 1 }
+  };
+
+  const setOptimizationProgress = (label: string, value: number) => {
+    optimizationProgressLabelEl.textContent = label;
+    optimizationProgressBarEl.value = Math.min(1, Math.max(0, value));
+    optimizationProgressEl.classList.remove("hidden");
+  };
+
+  const setOptimizationPhase = (
+    phase: "preparing" | "traffic" | "heatmap" | "optimize" | "done",
+    label: string,
+    ratio = 0
+  ) => {
+    optimizationPhase = phase;
+    const range = optimizationProgressRanges[phase];
+    const clampedRatio = Math.min(1, Math.max(0, ratio));
+    const value = range.start + (range.end - range.start) * clampedRatio;
+    setOptimizationProgress(label, value);
+  };
+
+  const finishOptimizationProgress = (message: string) => {
+    if (optimizationDoneTimer) {
+      window.clearTimeout(optimizationDoneTimer);
+    }
+    setOptimizationPhase("done", message, 1);
+    btnCancelOptimizationEl.disabled = true;
+    optimizationDoneTimer = window.setTimeout(() => {
+      optimizationProgressEl.classList.add("hidden");
+      optimizationDoneTimer = null;
+    }, 1500);
+  };
+
+  const clearOptimizationProgress = () => {
+    if (optimizationDoneTimer) {
+      window.clearTimeout(optimizationDoneTimer);
+      optimizationDoneTimer = null;
+    }
+    optimizationProgressEl.classList.add("hidden");
+    optimizationProgressBarEl.value = 0;
+    optimizationProgressLabelEl.textContent = "";
+    optimizationPhase = "idle";
   };
   function getStructureFrameInfo(): StructureFrameInfo | null {
     const bounds = frameLocked ? currentBounds : frameOverlay.getBounds();
@@ -1194,6 +1420,21 @@ async function init() {
     }
     return Math.max(1, value);
   };
+  const normalizeFootprintPoints = (
+    points: { x: number; y: number }[] | undefined,
+    fallback: { x: number; y: number }[]
+  ) => {
+    if (!points || points.length < 3) {
+      return fallback.map((point) => ({ ...point }));
+    }
+    const valid = points.every(
+      (point) => Number.isFinite(point.x) && Number.isFinite(point.y)
+    );
+    if (!valid) {
+      return fallback.map((point) => ({ ...point }));
+    }
+    return points.map((point) => ({ ...point }));
+  };
   const normalizeStructureRotation = (value: number, fallback: number) => {
     if (!Number.isFinite(value)) {
       return fallback;
@@ -1208,15 +1449,22 @@ async function init() {
     const defaults = createDefaultStructure();
     const source = next ?? defaults;
     clearStructureAnalysis();
-    structure.heightFt = normalizeStructureNumber(source.heightFt, defaults.heightFt);
-    structure.footprint.widthFt = normalizeStructureNumber(
-      source.footprint.widthFt,
-      defaults.footprint.widthFt
+    structure.version = 2;
+    structure.mode = source.mode === "imported" ? "imported" : "parametric";
+    structure.heightMeters = normalizeStructureNumber(
+      source.heightMeters,
+      defaults.heightMeters
     );
-    structure.footprint.lengthFt = normalizeStructureNumber(
-      source.footprint.lengthFt,
-      defaults.footprint.lengthFt
+    structure.footprint.points = normalizeFootprintPoints(
+      source.footprint.points,
+      defaults.footprint.points
     );
+    structure.legacyWidthFt = Number.isFinite(source.legacyWidthFt)
+      ? normalizeStructureNumber(source.legacyWidthFt as number, defaults.legacyWidthFt ?? 60)
+      : undefined;
+    structure.legacyLengthFt = Number.isFinite(source.legacyLengthFt)
+      ? normalizeStructureNumber(source.legacyLengthFt as number, defaults.legacyLengthFt ?? 90)
+      : undefined;
     structure.placeAtCenter =
       typeof source.placeAtCenter === "boolean"
         ? source.placeAtCenter
@@ -1229,6 +1477,19 @@ async function init() {
       source.rotationDeg,
       defaults.rotationDeg
     );
+    structure.facePriority = source.facePriority;
+    structure.imported = source.imported
+      ? {
+          ...source.imported,
+          offset: { ...source.imported.offset },
+          footprintProxy: source.imported.footprintProxy
+            ? {
+                points: source.imported.footprintProxy.points.map((point) => ({ ...point }))
+              }
+            : undefined
+        }
+      : undefined;
+    facePriority = structure.facePriority ?? null;
     syncStructureCenterToFrame();
     refreshStructureInputs(structure);
     updateStructurePreview();
@@ -1275,6 +1536,7 @@ async function init() {
     }
     visibilityComputing = active;
     updatePreviewSpin();
+    updateOptimizationControls();
   };
   const setTopographyLoading = (loading: boolean) => {
     if (topographyLoading === loading) {
@@ -1589,7 +1851,7 @@ async function init() {
     osm_height: "OSM height",
     osm_levels: "OSM levels",
     default: "Default",
-    user_override: "User override"
+    external_api: "External API"
   };
 
   const formatHeightValue = (value: number, decimals = 1) => {
@@ -1607,6 +1869,13 @@ async function init() {
     return `${formatHeightValue(meters)} m (${formatHeightValue(feet)} ft)`;
   };
 
+  const formatConfidenceLabel = (confidence: number) => {
+    if (!Number.isFinite(confidence)) {
+      return "--";
+    }
+    return `${Math.round(confidence * 100)}%`;
+  };
+
   const featureLabels: Record<FeatureSelection["kind"], string> = {
     road: "Road",
     building: "Building",
@@ -1614,7 +1883,8 @@ async function init() {
     sign: "Sign",
     traffic_signal: "Traffic signal",
     candidate: "Candidate",
-    structure: "Structure"
+    structure: "Structure",
+    dense_cover: "Dense cover"
   };
 
   function updateInspectPanel() {
@@ -1622,7 +1892,6 @@ async function init() {
     inspectBuildingDetailsEl.classList.add("hidden");
     inspectTreeDetailsEl.classList.add("hidden");
     inspectSignDetailsEl.classList.add("hidden");
-    inspectHeightMetersEl.disabled = true;
     inspectHeightFeetEl.disabled = true;
     inspectResetHeightEl.disabled = true;
     inspectTreeTypeEl.disabled = true;
@@ -1652,26 +1921,27 @@ async function init() {
         inspectGenericDetailsEl.classList.remove("hidden");
         return;
       }
-      inspectHeightMetersEl.disabled = false;
       inspectHeightFeetEl.disabled = false;
       inspectBuildingDetailsEl.classList.remove("hidden");
       inspectBuildingIdEl.textContent = building.name
         ? `${building.name} (${building.id})`
         : building.id;
+      inspectEffectiveHeightEl.textContent = formatHeightLabel(
+        building.height.effectiveHeightMeters
+      );
       inspectInferredHeightEl.textContent = formatHeightLabel(
         building.height.inferredHeightMeters
       );
       inspectHeightSourceEl.textContent =
-        heightSourceLabels[building.height.inferredHeightSource] ?? building.height.inferredHeightSource;
-      inspectResetHeightEl.disabled = !building.height.userHeightMeters;
+        heightSourceLabels[building.height.heightSource] ?? building.height.heightSource;
+      inspectHeightConfidenceEl.textContent = formatConfidenceLabel(building.height.confidence);
+      inspectResetHeightEl.disabled = !building.height.userOverrideMeters;
       inspectSyncing = true;
-      if (building.height.userHeightMeters) {
-        inspectHeightMetersEl.value = formatHeightValue(building.height.userHeightMeters);
+      if (building.height.userOverrideMeters) {
         inspectHeightFeetEl.value = formatHeightValue(
-          building.height.userHeightMeters / FEET_TO_METERS
+          building.height.userOverrideMeters / FEET_TO_METERS
         );
       } else {
-        inspectHeightMetersEl.value = "";
         inspectHeightFeetEl.value = "";
       }
       inspectSyncing = false;
@@ -1751,6 +2021,7 @@ async function init() {
       project: {
         bounds: currentBounds,
         shapes: drawingManager.getShapes(),
+        denseCover,
         structure,
         autoRoads: autoData.roads,
         autoBuildings: autoData.buildings,
@@ -1860,8 +2131,10 @@ async function init() {
   }) {
     if (request.kind === "tree") {
       const type = request.treeType ?? DEFAULT_TREE_TYPE;
-      const baseRadiusMeters = Number.isFinite(request.radiusMeters) && request.radiusMeters > 0
-        ? request.radiusMeters
+      const radiusMeters =
+        typeof request.radiusMeters === "number" ? request.radiusMeters : Number.NaN;
+      const baseRadiusMeters = Number.isFinite(radiusMeters) && radiusMeters > 0
+        ? radiusMeters
         : DEFAULT_TREE_RADIUS_METERS;
       const heightMeters = deriveTreeHeightMeters(baseRadiusMeters);
       const tree: Tree = {
@@ -1920,10 +2193,16 @@ async function init() {
       updated = true;
       const next = { ...building };
       if (meters && Number.isFinite(meters) && meters > 0) {
-        next.userHeightMeters = meters;
+        next.userOverrideMeters = meters;
       } else {
-        delete next.userHeightMeters;
+        delete next.userOverrideMeters;
       }
+      const heightInfo = resolveBuildingHeightInfo(next);
+      next.inferredHeightMeters = heightInfo.inferredHeightMeters;
+      next.heightSource = heightInfo.heightSource;
+      next.confidence = heightInfo.confidence;
+      next.userOverrideMeters = heightInfo.userOverrideMeters;
+      next.effectiveHeightMeters = heightInfo.effectiveHeightMeters;
       return next;
     });
     if (!updated) {
@@ -1942,6 +2221,7 @@ async function init() {
     updateWorldModel();
     updateDebugHud();
     scheduleAutosave();
+    updateOptimizationControls();
     pendingInterrupt();
   }
 
@@ -1984,24 +2264,6 @@ async function init() {
     return parsed;
   };
 
-  inspectHeightMetersEl.addEventListener("input", () => {
-    if (inspectSyncing) {
-      return;
-    }
-    if (!selectedFeature || selectedFeature.kind !== "building") {
-      return;
-    }
-    const meters = parseOverrideInput(inspectHeightMetersEl.value);
-    if (meters === null) {
-      return;
-    }
-    inspectSyncing = true;
-    inspectHeightFeetEl.value = formatHeightValue(meters / FEET_TO_METERS);
-    inspectSyncing = false;
-    applyBuildingOverride(selectedFeature.id, meters);
-  });
-  inspectHeightMetersEl.addEventListener("blur", () => updateInspectPanel());
-
   inspectHeightFeetEl.addEventListener("input", () => {
     if (inspectSyncing) {
       return;
@@ -2014,9 +2276,6 @@ async function init() {
       return;
     }
     const meters = feet * FEET_TO_METERS;
-    inspectSyncing = true;
-    inspectHeightMetersEl.value = formatHeightValue(meters);
-    inspectSyncing = false;
     applyBuildingOverride(selectedFeature.id, meters);
   });
   inspectHeightFeetEl.addEventListener("blur", () => updateInspectPanel());
@@ -2497,7 +2756,7 @@ async function init() {
     trafficOverlayByRoadId = buildTrafficOverlayData(trafficBaseByRoadId, customRoads);
     applyTrafficViewState();
     applyTrafficVisibility();
-    drawingManager.setTrafficEpicenters(trafficEpicenters ?? []);
+    drawingManager.setTrafficEpicenters(debugEnabled ? trafficEpicenters ?? [] : []);
     const flowData: TrafficFlowData = {
       edgeTraffic: trafficEdgeTraffic ?? null,
       flowDensity: trafficView.flowDensity
@@ -2602,7 +2861,7 @@ async function init() {
           includeObstacles: false,
           includeBuildings: false,
           includeTrafficSignals: true,
-          roadClassFilter: "major"
+          roadClassFilter: "major_connectors"
         })
       ]);
       const mergedRoads = mergeOsmRoads(frameResult.roads, simResult.roads);
@@ -2612,6 +2871,13 @@ async function init() {
       );
       const roads = mergedRoads.map((road) => mapOsmRoad(road));
       const buildings = frameResult.buildings.map((building) => mapOsmBuilding(building));
+      const heightProviders = getDefaultBuildingHeightProviders();
+      const buildingHeights = await resolveBuildingHeights(
+        buildings,
+        { bounds: simBounds, signal: controller.signal },
+        heightProviders
+      );
+      const enrichedBuildings = applyBuildingHeightEstimates(buildings, buildingHeights);
       const trees = fetchOsmObstacles
         ? frameResult.trees.map((tree) => mapOsmTree(tree))
         : autoData.trees;
@@ -2622,7 +2888,7 @@ async function init() {
       autoData = {
         bounds: simBounds,
         roads,
-        buildings,
+        buildings: enrichedBuildings,
         trees,
         signs,
         trafficSignals,
@@ -2641,6 +2907,7 @@ async function init() {
       trafficBaseByRoadId = null;
       trafficOverlayByRoadId = {};
       trafficMeta = null;
+      trafficGraphCapMessage = null;
       trafficEpicenters = null;
       trafficEdgeTraffic = null;
       trafficViewerSamples = null;
@@ -2691,6 +2958,7 @@ async function init() {
     btnComputeTrafficEl.disabled = false;
     hideTrafficProgress();
     drawingManager.setTrafficPreview({ active: false });
+    updateOptimizationControls();
   }
 
   function cancelTrafficRun(options?: { message?: string | null; skipWorkflow?: boolean }) {
@@ -2698,6 +2966,10 @@ async function init() {
       trafficWorker.postMessage({ type: "cancel", runId: activeTrafficRunId });
     }
     finishTrafficRun();
+    notifyTrafficRunListeners({
+      ok: false,
+      message: options?.message ?? "Traffic simulation canceled."
+    });
     if (options?.message !== undefined) {
       setTrafficStatus(options.message);
     }
@@ -2724,6 +2996,11 @@ async function init() {
       if (typeof progress.phase === "string" && progress.phase.trim()) {
         trafficProgressLabelEl.textContent = `Simulating ${formatTrafficPresetLabel(progress.phase)}…`;
       }
+      if (optimizationInFlight && optimizationPhase === "traffic") {
+        const range = optimizationProgressRanges.traffic;
+        const scaled = range.start + (range.end - range.start) * (Number.isFinite(ratio) ? ratio : 0);
+        setOptimizationProgress("Simulating traffic…", scaled);
+      }
       return;
     }
     if (type === "error") {
@@ -2731,6 +3008,10 @@ async function init() {
       setTrafficStatus(
         typeof data.message === "string" ? data.message : "Traffic simulation failed."
       );
+      notifyTrafficRunListeners({
+        ok: false,
+        message: typeof data.message === "string" ? data.message : "Traffic simulation failed."
+      });
       setWorkflowMode(frameLocked ? "frame_locked" : "explore");
       refreshWorkflowUI();
       return;
@@ -2759,9 +3040,12 @@ async function init() {
         trafficMeta = payload.meta ?? null;
         applyTrafficResultsToRoads(getActiveRoads(), payload.trafficByRoadId, dwellByRoadId ?? undefined);
         applyTrafficData();
-        setTrafficStatus(formatTrafficMeta(payload.meta));
+        setTrafficStatus(formatTrafficMeta(payload.meta, trafficGraphCapMessage));
+        trafficSignature = buildTrafficSignature();
+        notifyTrafficRunListeners({ ok: true });
       } else {
         setTrafficStatus("Traffic computed.");
+        notifyTrafficRunListeners({ ok: false, message: "Traffic payload missing results." });
       }
       setWorkflowMode("analysis_ready");
       refreshWorkflowUI();
@@ -2782,6 +3066,7 @@ async function init() {
         console.error(event);
         finishTrafficRun();
         setTrafficStatus("Traffic worker error.");
+        notifyTrafficRunListeners({ ok: false, message: "Traffic worker error." });
         setWorkflowMode(frameLocked ? "frame_locked" : "explore");
         refreshWorkflowUI();
       });
@@ -2817,6 +3102,15 @@ async function init() {
       statusMessageEl.textContent = "Load topography before simulating custom roads.";
       return;
     }
+    const cappedTraffic = capTrafficRoadsByEdgeCount(
+      trafficRoads,
+      frameBounds,
+      TRAFFIC_MAX_GRAPH_EDGES
+    );
+    trafficGraphCapMessage = cappedTraffic.capped
+      ? `graph capped (${cappedTraffic.keptEdges.toLocaleString()} of ${cappedTraffic.totalEdges.toLocaleString()} edges)`
+      : null;
+    const trafficRoadsFinal = cappedTraffic.roads;
     const trafficBuildings = buildTrafficBuildings(autoData.buildings, mapper);
     const trafficSignals = buildTrafficSignals(autoData.trafficSignals, mapper);
     const worker = ensureTrafficWorker();
@@ -2825,6 +3119,7 @@ async function init() {
     }
     trafficInFlight = true;
     updatePreviewSpin();
+    updateOptimizationControls();
     trafficRunId += 1;
     activeTrafficRunId = trafficRunId;
     btnComputeTrafficEl.disabled = true;
@@ -2843,7 +3138,7 @@ async function init() {
       ? { lat: epicenter.lat, lon: epicenter.lon }
       : null;
     const request: TrafficSimRequest = {
-      roads: trafficRoads,
+      roads: trafficRoadsFinal,
       buildings: trafficBuildings ?? undefined,
       frameBounds,
       simBounds,
@@ -2863,20 +3158,44 @@ async function init() {
   let pendingShapeRestore: { bounds: GeoBounds | null; shapes: Shape[] } | null = null;
 
   function buildProjectState(): RuntimeProjectState {
+    const imported =
+      structure.imported
+        ? {
+            ...structure.imported,
+            offset: { ...structure.imported.offset },
+            footprintProxy: structure.imported.footprintProxy
+              ? {
+                  points: structure.imported.footprintProxy.points.map((point) => ({ ...point }))
+                }
+              : undefined
+          }
+        : undefined;
     return {
       bounds: currentBounds,
       basemapMode,
       basemapId: basemapMode,
       settings: { ...settings },
       shapes: drawingManager.getShapes(),
+      denseCover: denseCover.map((item) => ({
+        ...item,
+        polygonLatLon: item.polygonLatLon.map((point) => ({ ...point }))
+      })),
       trees: trees.map((tree) => ({ ...tree })),
       signs: signs.map((sign) => ({ ...sign })),
       structure: {
-        heightFt: structure.heightFt,
-        footprint: { ...structure.footprint },
+        version: structure.version,
+        mode: structure.mode,
+        footprint: {
+          points: structure.footprint.points.map((point) => ({ ...point }))
+        },
+        heightMeters: structure.heightMeters,
         placeAtCenter: structure.placeAtCenter,
         centerPx: { ...structure.centerPx },
-        rotationDeg: structure.rotationDeg
+        rotationDeg: structure.rotationDeg,
+        facePriority: structure.facePriority ? { ...structure.facePriority } : undefined,
+        legacyWidthFt: structure.legacyWidthFt,
+        legacyLengthFt: structure.legacyLengthFt,
+        imported
       },
       roadMode,
       autoData: {
@@ -3014,6 +3333,7 @@ async function init() {
     const nextAutoSignals = resolveProjectAutoTrafficSignals(project);
     trees = project.trees ?? [];
     signs = project.signs ?? [];
+    denseCover = project.denseCover ?? [];
     autoData = {
       bounds: extras?.autoData?.bounds ?? project.autoData?.bounds ?? project.bounds ?? null,
       roads: nextAutoRoads.map((road) => ({ ...road, source: road.source ?? "osm" })),
@@ -3207,10 +3527,131 @@ async function init() {
     updateLabelStatus();
     scheduleAutosave();
   };
+  const updateMlDetectButton = () => {
+    if (!btnDetectMlFrame) {
+      return;
+    }
+    btnDetectMlFrame.disabled = mlDetecting || !frameLocked;
+  };
+  const detectMlInFrame = async () => {
+    if (mlDetecting) {
+      return;
+    }
+    if (!frameLocked || !currentBounds) {
+      statusMessageEl.textContent = "Lock a frame before running ML detection.";
+      return;
+    }
+    mlDetecting = true;
+    updateMlDetectButton();
+    statusMessageEl.textContent = "Running ML detection…";
+    try {
+      const { manifest } = await loadTreeSignsModel();
+      const tileId = getTileSourceIdForBasemap(basemapMode, autoStreetSupported);
+      const tileSource = getTileSource(tileId);
+      const zoom = Math.min(tileSource.maxZoom, Math.max(0, Math.round(mapView.getZoom())));
+      const patchSizePx = Math.max(64, Math.round(manifest.input?.width ?? 640));
+      const topLeft = projectLatLonForMl(currentBounds.north, currentBounds.west, zoom);
+      const bottomRight = projectLatLonForMl(currentBounds.south, currentBounds.east, zoom);
+      const minX = Math.min(topLeft.x, bottomRight.x);
+      const maxX = Math.max(topLeft.x, bottomRight.x);
+      const minY = Math.min(topLeft.y, bottomRight.y);
+      const maxY = Math.max(topLeft.y, bottomRight.y);
+      const stride = Math.max(32, patchSizePx * (1 - ML_PATCH_OVERLAP));
+      const centers: Array<{ x: number; y: number }> = [];
+      if (maxX - minX <= patchSizePx || maxY - minY <= patchSizePx) {
+        centers.push({ x: (minX + maxX) / 2, y: (minY + maxY) / 2 });
+      } else {
+        for (let y = minY + patchSizePx / 2; y <= maxY - patchSizePx / 2; y += stride) {
+          for (let x = minX + patchSizePx / 2; x <= maxX - patchSizePx / 2; x += stride) {
+            centers.push({ x, y });
+          }
+        }
+      }
+      const detections: Array<
+        PatchPrediction & { worldCx: number; worldCy: number; worldW: number; worldH: number }
+      > = [];
+      for (let i = 0; i < centers.length; i += 1) {
+        const center = centers[i];
+        const centerLatLon = unprojectLatLonForMl(center.x, center.y, zoom);
+        const canvas = await renderPatchImage({
+          centerLatLon,
+          zoom,
+          sizePx: patchSizePx,
+          tileSource
+        });
+        const patchPredictions = await detectOnPatch(canvas);
+        patchPredictions.forEach((prediction) => {
+          if (prediction.class !== "tree_pine" && prediction.class !== "tree_deciduous") {
+            return;
+          }
+          detections.push({
+            ...prediction,
+            worldCx: center.x + (prediction.cx - patchSizePx / 2),
+            worldCy: center.y + (prediction.cy - patchSizePx / 2),
+            worldW: prediction.w,
+            worldH: prediction.h
+          });
+        });
+        if (ML_PATCH_THROTTLE_MS > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, ML_PATCH_THROTTLE_MS));
+        }
+      }
+      const merged = applyMlNms(detections, ML_NMS_IOU);
+      const frameSize = geoProjector?.size ?? baseImageSize;
+      const objects: LabelDataset["objects"] = merged.map((prediction) => {
+        const center = unprojectLatLonForMl(prediction.worldCx, prediction.worldCy, zoom);
+        const metersPerPixel = metersPerPixelAtLatForMl(center.lat, zoom);
+        const radiusPx = 0.5 * Math.max(prediction.worldW, prediction.worldH);
+        const crownRadiusMeters = Math.max(0.1, radiusPx * metersPerPixel);
+        return {
+          kind: "tree",
+          location: { lat: center.lat, lon: center.lon },
+          type: prediction.class === "tree_pine" ? "pine" : "deciduous",
+          crownRadiusMeters,
+          confidence: prediction.confidence
+        };
+      });
+      if (objects.length === 0) {
+        statusMessageEl.textContent = "No ML trees found in the current frame.";
+        return;
+      }
+      const dataset: LabelDataset = {
+        schemaVersion: 1,
+        createdAt: new Date().toISOString(),
+        frame: {
+          bounds: currentBounds,
+          size: frameSize,
+          zoom
+        },
+        imagery: {
+          basemapId: tileId,
+          label: tileSource.label,
+          url: tileSource.url,
+          attribution: tileSource.attribution
+        },
+        objects
+      };
+      const { trees: nextTrees, signs: nextSigns } = buildPredictionFeatures(dataset, {
+        createId: createFeatureId
+      });
+      applyPredictions(nextTrees, nextSigns, "ML detect (beta)");
+      statusMessageEl.textContent = `ML detections queued (${nextTrees.length} trees).`;
+    } catch (err) {
+      statusMessageEl.textContent = `ML detection failed: ${
+        err instanceof Error ? err.message : "unknown error"
+      }`;
+    } finally {
+      mlDetecting = false;
+      updateMlDetectButton();
+    }
+  };
   btnExportLabelsEl.addEventListener("click", exportLabels);
   btnClearPredictionsEl.addEventListener("click", () => {
     applyPredictions([], [], null);
     statusMessageEl.textContent = "Predictions cleared.";
+  });
+  btnDetectMlFrame?.addEventListener("click", () => {
+    void detectMlInFrame();
   });
   importPredictionsFileEl.addEventListener("change", async () => {
     if (!importPredictionsFileEl.files || importPredictionsFileEl.files.length === 0) {
@@ -3238,6 +3679,109 @@ async function init() {
       importPredictionsFileEl.value = "";
     }
   });
+  importMlTreesFileEl?.addEventListener("change", async () => {
+    if (!importMlTreesFileEl.files || importMlTreesFileEl.files.length === 0) {
+      return;
+    }
+    const file = importMlTreesFileEl.files[0];
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as unknown;
+      const records = Array.isArray(parsed) ? parsed : [];
+      const importedTrees: Tree[] = [];
+      const importedSigns: Sign[] = [];
+      records.forEach((record) => {
+        if (!record || typeof record !== "object") {
+          return;
+        }
+        const entry = record as {
+          lat?: unknown;
+          lon?: unknown;
+          type?: unknown;
+          crownRadiusMeters?: unknown;
+          derivedHeightMeters?: unknown;
+          yawDeg?: unknown;
+          kind?: unknown;
+        };
+        const lat = typeof entry.lat === "number" ? entry.lat : null;
+        const lon = typeof entry.lon === "number" ? entry.lon : null;
+        const radius = typeof entry.crownRadiusMeters === "number" ? entry.crownRadiusMeters : null;
+        const height =
+          typeof entry.derivedHeightMeters === "number" ? entry.derivedHeightMeters : null;
+        const typeRaw = typeof entry.type === "string" ? entry.type : "";
+        const kindRaw = typeof entry.kind === "string" ? entry.kind : "";
+        if (
+          lat === null ||
+          lon === null ||
+          radius === null ||
+          !Number.isFinite(lat) ||
+          !Number.isFinite(lon) ||
+          !Number.isFinite(radius)
+        ) {
+          const signKind =
+            typeRaw === "billboard" || kindRaw === "billboard"
+              ? "billboard"
+              : typeRaw === "sign" || typeRaw === "stop_sign" || kindRaw === "sign"
+                ? "sign"
+                : null;
+          if (
+            lat === null ||
+            lon === null ||
+            !Number.isFinite(lat) ||
+            !Number.isFinite(lon) ||
+            !signKind
+          ) {
+            return;
+          }
+          const defaults = DEFAULT_SIGN_DIMENSIONS[signKind];
+          importedSigns.push({
+            id: createFeatureId("ml-sign"),
+            location: { lat, lon },
+            kind: signKind,
+            widthMeters: defaults.widthMeters,
+            heightMeters: defaults.heightMeters,
+            bottomClearanceMeters: defaults.bottomClearanceMeters,
+            yawDegrees: typeof entry.yawDeg === "number" ? entry.yawDeg : 0,
+            heightSource: "ml"
+          });
+          return;
+        }
+        const type =
+          typeRaw === "tree_pine" || typeRaw === "pine"
+            ? "pine"
+            : typeRaw === "tree_deciduous" || typeRaw === "deciduous"
+              ? "deciduous"
+              : null;
+        if (!type) {
+          return;
+        }
+        importedTrees.push({
+          id: createFeatureId("ml-tree"),
+          location: { lat, lon },
+          type,
+          baseRadiusMeters: Math.max(0, radius),
+          heightMeters: Number.isFinite(height)
+            ? Math.max(0, height as number)
+            : deriveTreeHeightMeters(radius),
+          heightSource: "ml"
+        });
+      });
+      if (importedTrees.length === 0 && importedSigns.length === 0) {
+        statusMessageEl.textContent = "No ML trees or signs found in import.";
+        return;
+      }
+      trees = [...trees, ...importedTrees];
+      signs = [...signs, ...importedSigns];
+      updateWorldModel();
+      updateLabelStatus();
+      scheduleAutosave();
+      statusMessageEl.textContent = `Imported ${importedTrees.length} ML trees and ${importedSigns.length} ML signs into obstacles.`;
+    } catch (err) {
+      statusMessageEl.textContent = `ML import failed: ${(err as Error).message}`;
+    } finally {
+      importMlTreesFileEl.value = "";
+    }
+  });
   updateLabelStatus();
   setupSettings(settings, drawingManager, {
     interruptComputations: () => pendingInterrupt(),
@@ -3257,6 +3801,7 @@ async function init() {
         clearStructureAnalysis();
         updateStructurePreview();
         updateStructureRender();
+        updateOptimizationControls();
         scheduleAutosave();
       },
       onCenteredChange: (centered) => {
@@ -3459,112 +4004,311 @@ async function init() {
     trafficViewerSamples
   });
 
-  const actionControls = setupActions(
-    drawingManager,
-    settings,
-    () => mapper,
-    () => topographyCoverage,
-    statusMessageEl,
-    getVisibilitySources,
-    {
-      onShadingComplete: () => {},
-      setVisibilityComputing,
-      buildProjectState,
-      buildProjectPayload,
-      applyProjectState,
-      scheduleAutosave
+  function updateOptimizationControls() {
+    const hasCandidates = drawingManager
+      .getShapes()
+      .some((shape) => shape.type === "candidate" && shape.visible !== false);
+    const hasStructure = isValidFootprint(resolveStructureFootprintPoints(structure));
+    const topoReady = Boolean(mapper) && topographyCoverage >= TOPO_MIN_COVERAGE_ENABLE;
+    const canRun =
+      frameLocked &&
+      topoReady &&
+      hasCandidates &&
+      hasStructure &&
+      !optimizationInFlight &&
+      !trafficInFlight &&
+      !visibilityComputing;
+    btnRunOptimizationEl.disabled = !canRun;
+    btnCancelOptimizationEl.disabled = !optimizationInFlight;
+  }
+
+  function notifyTrafficRunListeners(outcome: { ok: boolean; message?: string }) {
+    const listeners = trafficRunListeners.slice();
+    trafficRunListeners = [];
+    listeners.forEach((listener) => listener(outcome));
+  }
+
+  function buildTrafficSignature(): string | null {
+    const bounds = currentBounds ?? frameOverlay.getBounds();
+    if (!bounds) {
+      return null;
     }
-  );
+    const roads = getActiveRoads();
+    const roadSignature = roads.map((road) => `${road.id}:${road.points.length}`).join("|");
+    const epicenterKey = epicenter
+      ? `${epicenter.lat.toFixed(5)},${epicenter.lon.toFixed(5)},${epicenterRadiusM.toFixed(1)}`
+      : "none";
+    return JSON.stringify({
+      bounds: [
+        bounds.north.toFixed(5),
+        bounds.south.toFixed(5),
+        bounds.east.toFixed(5),
+        bounds.west.toFixed(5)
+      ],
+      roadMode,
+      roadSignature,
+      detail: trafficConfig.detail,
+      seed: trafficConfig.seed,
+      centralShare: trafficConfig.centralShare,
+      epicenter: epicenterKey
+    });
+  }
+
+  function isTrafficStale(): boolean {
+    const nextSignature = buildTrafficSignature();
+    if (!nextSignature) {
+      return true;
+    }
+    if (!trafficBaseByRoadId || !trafficViewerSamples) {
+      return true;
+    }
+    return trafficSignature !== nextSignature;
+  }
+
+  function waitForTrafficCompletion(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException("Optimization canceled.", "AbortError"));
+        return;
+      }
+      const listener = (outcome: { ok: boolean; message?: string }) => {
+        cleanup();
+        if (outcome.ok) {
+          resolve();
+          return;
+        }
+        reject(new Error(outcome.message ?? "Traffic simulation failed."));
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(new DOMException("Optimization canceled.", "AbortError"));
+      };
+      const cleanup = () => {
+        trafficRunListeners = trafficRunListeners.filter((item) => item !== listener);
+        signal.removeEventListener("abort", onAbort);
+      };
+      trafficRunListeners = [...trafficRunListeners, listener];
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  setupProjectActions(drawingManager, settings, statusMessageEl, {
+    buildProjectState,
+    buildProjectPayload,
+    applyProjectState,
+    scheduleAutosave
+  });
   structureFacePriorityEl.addEventListener("change", () => {
     const raw = structureFacePriorityEl.value.trim();
     if (!raw) {
-      pinnedFaceId = null;
+      facePriority = null;
+      structure.facePriority = undefined;
     } else {
       const parsed = Number.parseInt(raw, 10);
-      pinnedFaceId = Number.isFinite(parsed) ? parsed : null;
+      const arcDeg: FacePriorityArc["arcDeg"] = facePriority?.arcDeg ?? 180;
+      facePriority = Number.isFinite(parsed)
+        ? { primaryEdgeIndex: parsed, arcDeg }
+        : null;
+      structure.facePriority = facePriority ?? undefined;
     }
     if (structureAnalysis) {
       updateStructureAnalysisUI(structureAnalysis);
     }
   });
   updateStructureAnalysisUI(null);
+  const abortOptimizationFlow = (message?: string) => {
+    if (!optimizationAbortController) {
+      return;
+    }
+    optimizationAbortController.abort();
+    if (trafficInFlight) {
+      cancelTrafficRun({ message: message ?? "Optimization canceled.", skipWorkflow: true });
+    }
+    if (trafficWorker) {
+      trafficWorker.terminate();
+      trafficWorker = null;
+    }
+  };
 
-  btnOptimizeStructureEl.addEventListener("click", async () => {
-    const mapperSnapshot = mapper;
-    if (!mapperSnapshot) {
-      statusMessageEl.textContent = "Load topography before optimizing structure placement.";
-      return;
-    }
-    if (topographyCoverage < TOPO_MIN_COVERAGE_ENABLE) {
-      statusMessageEl.textContent = `Terrain still loading (${Math.round(
-        topographyCoverage * 100
-      )}%). Wait for more coverage.`;
-      return;
-    }
-    const frameInfo = getStructureFrameInfo();
-    if (!frameInfo) {
-      statusMessageEl.textContent = "Set a frame before optimizing structure placement.";
-      return;
-    }
-    const shapes = drawingManager.getShapes();
-    const visibilitySources = getVisibilitySources();
-    const obstaclesSnapshot = shapes.filter(
-      (shape) => shape.type === "obstacle" && shape.visible !== false
-    );
-    const combinedGrid = buildCombinedHeightGrid(mapperSnapshot, {
-      buildings: visibilitySources.buildings,
-      trees: visibilitySources.trees,
-      signs: visibilitySources.signs,
-      obstacles: obstaclesSnapshot
-    });
-    const viewers = sampleViewerPoints(shapes, settings, mapperSnapshot).concat(
-      buildTrafficViewerSamples(visibilitySources.trafficViewerSamples, mapperSnapshot)
-    );
-    if (viewers.length === 0) {
-      statusMessageEl.textContent =
-        "Need viewer zones or traffic samples to optimize structure placement.";
-      return;
-    }
-    const candidateRegions =
-      worldModel?.candidates
-        .filter((candidate) => candidate.visible !== false)
-        .map((candidate) => ({
-          id: candidate.id,
-          points: candidate.render ?? []
-        }))
-        .filter((candidate) => candidate.points.length >= 3) ?? [];
-    if (candidateRegions.length === 0) {
-      statusMessageEl.textContent = "Need candidate regions to optimize structure placement.";
-      return;
-    }
-
-    const widthM = Math.max(1, structure.footprint.widthFt) * FEET_TO_METERS;
-    const lengthM = Math.max(1, structure.footprint.lengthFt) * FEET_TO_METERS;
-    const heightM = Math.max(1, structure.heightFt) * FEET_TO_METERS;
-    const pixelsPerMeterX = frameInfo.widthPx / frameInfo.widthM;
-    const pixelsPerMeterY = frameInfo.heightPx / frameInfo.heightM;
-    if (!Number.isFinite(pixelsPerMeterX) || !Number.isFinite(pixelsPerMeterY)) {
-      statusMessageEl.textContent = "Frame metrics are unavailable for optimization.";
-      return;
-    }
-    const footprintTemplate = buildRectFootprintTemplate(
-      widthM * pixelsPerMeterX,
-      lengthM * pixelsPerMeterY
-    );
-    const squareToRoad = structureSquareToRoadEl.checked;
-    const roadsForSnap = squareToRoad
-      ? worldModel?.roads
-          .filter((road) => road.render && road.render.length >= 2)
-          .map((road) => ({
-            points: road.render as Array<{ x: number; y: number }>,
-            class: road.class
-          }))
-      : undefined;
-
-    btnOptimizeStructureEl.disabled = true;
-    statusMessageEl.textContent = "Optimizing structure placement…";
-    await delayFrame();
+  async function runOptimizationFlow({ signal }: { signal: AbortSignal }) {
+    optimizationInFlight = true;
+    btnCancelOptimizationEl.disabled = false;
+    updateOptimizationControls();
+    clearOptimizationProgress();
+    const throwIfAborted = () => {
+      if (signal.aborted) {
+        throw new DOMException("Optimization canceled.", "AbortError");
+      }
+    };
     try {
+      if (!frameLocked) {
+        statusMessageEl.textContent = "Lock the frame before running optimization.";
+        return;
+      }
+      const mapperSnapshot = mapper;
+      if (!mapperSnapshot) {
+        statusMessageEl.textContent = "Load topography before running optimization.";
+        return;
+      }
+      if (topographyCoverage < TOPO_MIN_COVERAGE_ENABLE) {
+        statusMessageEl.textContent = `Terrain still loading (${Math.round(
+          topographyCoverage * 100
+        )}%). Wait for more coverage.`;
+        return;
+      }
+      const frameInfo = getStructureFrameInfo();
+      if (!frameInfo) {
+        statusMessageEl.textContent = "Set a frame before running optimization.";
+        return;
+      }
+      const shapes = drawingManager.getShapes();
+      const candidateShapes = shapes.filter(
+        (shape) => shape.type === "candidate" && shape.visible !== false
+      );
+      if (candidateShapes.length === 0) {
+        statusMessageEl.textContent = "Add at least one candidate region before running optimization.";
+        return;
+      }
+      if (!isValidFootprint(resolveStructureFootprintPoints(structure))) {
+        statusMessageEl.textContent = "Structure footprint is invalid.";
+        return;
+      }
+
+      setOptimizationPhase("preparing", "Preparing…", 1);
+      statusMessageEl.textContent = "Preparing optimization…";
+      throwIfAborted();
+
+      if (trafficInFlight && !isTrafficStale()) {
+        setOptimizationPhase("traffic", "Simulating traffic…", 0);
+        await waitForTrafficCompletion(signal);
+      } else if (isTrafficStale()) {
+        setOptimizationPhase("traffic", "Simulating traffic…", 0);
+        requestTrafficCompute({ restart: true });
+        if (!trafficInFlight) {
+          throw new Error("Traffic simulation could not start.");
+        }
+        await waitForTrafficCompletion(signal);
+      }
+      throwIfAborted();
+
+      updateWorldModel();
+      const visibilitySources = getVisibilitySources();
+      const obstaclesSnapshot = shapes.filter(
+        (shape) => shape.type === "obstacle" && shape.visible !== false
+      );
+      const combinedGrid = buildCombinedHeightGrid(mapperSnapshot, {
+        buildings: visibilitySources.buildings,
+        trees: visibilitySources.trees,
+        signs: visibilitySources.signs,
+        obstacles: obstaclesSnapshot
+      });
+      const combinedGridNoTrees =
+        denseCover.length > 0
+          ? buildCombinedHeightGrid(mapperSnapshot, {
+              buildings: visibilitySources.buildings,
+              signs: visibilitySources.signs,
+              obstacles: obstaclesSnapshot
+            })
+          : null;
+      const trafficViewers = buildTrafficViewerSamples(
+        visibilitySources.trafficViewerSamples,
+        mapperSnapshot
+      );
+
+      setVisibilityComputing(true);
+      setOptimizationPhase("heatmap", "Computing visibility / heatmap…", 0);
+      statusMessageEl.textContent = "Computing visibility heatmap…";
+      const passSteps = buildPassSteps(Math.max(1, settings.sampleStepPx), mapperSnapshot.geo.image);
+      for (let i = 0; i < passSteps.length; i += 1) {
+        throwIfAborted();
+        const step = passSteps[i];
+        const tempSettings = withSampleResolution(settings, step);
+        const viewers = sampleViewerPoints(shapes, tempSettings, mapperSnapshot).concat(
+          trafficViewers
+        );
+        const candidates = sampleCandidatePoints(shapes, tempSettings, mapperSnapshot);
+        if (viewers.length === 0 || candidates.length === 0) {
+          statusMessageEl.textContent =
+            viewers.length === 0
+              ? "Need viewer zones or traffic samples to compute heatmap."
+              : "Need candidate zones to compute heatmap.";
+          drawingManager.clearHeatmap();
+          clearOptimizationProgress();
+          return;
+        }
+        const heatmap = computeVisibilityHeatmap(
+          viewers,
+          candidates,
+          combinedGrid,
+          tempSettings,
+          mapperSnapshot,
+          {
+            denseCover,
+            forestK: settings.forestK,
+            combinedGridNoTrees
+          },
+          signal
+        );
+        throwIfAborted();
+        drawingManager.setHeatmap(heatmap, Math.max(1, tempSettings.sampleStepPx));
+        setOptimizationPhase(
+          "heatmap",
+          "Computing visibility / heatmap…",
+          (i + 1) / passSteps.length
+        );
+        await delayFrame();
+      }
+      statusMessageEl.textContent = "Heatmap computed.";
+      throwIfAborted();
+
+      setOptimizationPhase("optimize", "Optimizing placement/orientation…", 0);
+      statusMessageEl.textContent = "Optimizing structure placement…";
+      const viewers = sampleViewerPoints(shapes, settings, mapperSnapshot).concat(trafficViewers);
+      if (viewers.length === 0) {
+        statusMessageEl.textContent =
+          "Need viewer zones or traffic samples to optimize structure placement.";
+        clearOptimizationProgress();
+        return;
+      }
+      const candidateRegions =
+        worldModel?.candidates
+          .filter((candidate) => candidate.visible !== false)
+          .map((candidate) => ({
+            id: candidate.id,
+            points: candidate.render ?? []
+          }))
+          .filter((candidate) => candidate.points.length >= 3) ?? [];
+      if (candidateRegions.length === 0) {
+        statusMessageEl.textContent = "Need candidate regions to optimize structure placement.";
+        clearOptimizationProgress();
+        return;
+      }
+
+      const heightM = Math.max(1, structure.heightMeters);
+      const pixelsPerMeterX = frameInfo.widthPx / frameInfo.widthM;
+      const pixelsPerMeterY = frameInfo.heightPx / frameInfo.heightM;
+      if (!Number.isFinite(pixelsPerMeterX) || !Number.isFinite(pixelsPerMeterY)) {
+        statusMessageEl.textContent = "Frame metrics are unavailable for optimization.";
+        clearOptimizationProgress();
+        return;
+      }
+      const activeFootprint = resolveStructureFootprintPoints(structure);
+      const footprintTemplate = buildPolygonFootprintTemplate(
+        activeFootprint.map((point) => ({
+          x: point.x * pixelsPerMeterX,
+          y: point.y * pixelsPerMeterY
+        }))
+      );
+      const squareToRoad = structureSquareToRoadEl.checked;
+      const roadsForSnap = squareToRoad
+        ? worldModel?.roads
+            .filter((road) => road.render && road.render.length >= 2)
+            .map((road) => ({
+              points: road.render as Array<{ x: number; y: number }>,
+              class: road.class
+            }))
+        : undefined;
+
       const result = optimizeStructurePlacement({
         footprintTemplate,
         heightM,
@@ -3574,16 +4318,19 @@ async function init() {
         mapper: mapperSnapshot,
         settings,
         roads: roadsForSnap,
-        pinnedFaceId,
+        facePriority,
         squareToRoad,
         rotationStepDeg: 10,
         rotationRefineStepDeg: 2,
         placementSamples: 30,
-        refineTopK: 3
+        refineTopK: 3,
+        signal
       });
+      throwIfAborted();
       if (!result) {
         statusMessageEl.textContent = "No valid placement found in candidate regions.";
         clearStructureAnalysis();
+        clearOptimizationProgress();
         return;
       }
       structureAnalysis = result;
@@ -3594,10 +4341,19 @@ async function init() {
       structure.placeAtCenter = false;
       structureCenteredEl.checked = false;
       structure.centerPx = { ...result.placement.center };
-      structure.rotationDeg = normalizeStructureRotation(
+      const rotationFallback =
+        structure.mode === "imported" && structure.imported
+          ? structure.imported.rotationDeg
+          : structure.rotationDeg;
+      const nextRotation = normalizeStructureRotation(
         result.placement.rotationDeg,
-        structure.rotationDeg
+        rotationFallback
       );
+      if (structure.mode === "imported" && structure.imported) {
+        structure.imported.rotationDeg = nextRotation;
+      } else {
+        structure.rotationDeg = nextRotation;
+      }
       updateStructurePreview();
       updateStructureRender();
       updateStructureAnalysisUI(result);
@@ -3605,23 +4361,47 @@ async function init() {
       statusMessageEl.textContent = `Best placement score ${formatScore(
         result.placement.totalScore
       )}.`;
+      finishOptimizationProgress("Done");
     } catch (err) {
-      console.error(err);
-      statusMessageEl.textContent = `Optimization error: ${(err as Error).message}`;
+      if (err instanceof DOMException && err.name === "AbortError") {
+        statusMessageEl.textContent = "Optimization canceled.";
+        finishOptimizationProgress("Canceled");
+      } else {
+        console.error(err);
+        statusMessageEl.textContent = `Optimization error: ${(err as Error).message}`;
+        finishOptimizationProgress("Error");
+      }
     } finally {
-      btnOptimizeStructureEl.disabled = false;
+      setVisibilityComputing(false);
+      optimizationInFlight = false;
+      optimizationAbortController = null;
+      btnCancelOptimizationEl.disabled = true;
+      updateOptimizationControls();
     }
+  }
+
+  btnRunOptimizationEl.addEventListener("click", () => {
+    if (optimizationInFlight) {
+      return;
+    }
+    const controller = new AbortController();
+    optimizationAbortController = controller;
+    void runOptimizationFlow({ signal: controller.signal });
+  });
+
+  btnCancelOptimizationEl.addEventListener("click", () => {
+    abortOptimizationFlow("Optimization canceled.");
   });
   if (debugEnabled) {
     setupDebugProbe(canvas, () => mapper, () => lastPointer);
   }
   pendingInterrupt = () => {
-    actionControls.cancelHeatmap();
+    abortOptimizationFlow("Optimization canceled.");
   };
   drawingManager.setContours(null);
   drawingManager.setContourOpacity(settings.opacity.contours);
   drawingManager.setShowContours(settings.overlays.showContours);
-  actionControls.setTopographyReady(false);
+  updateOptimizationControls();
 
   updateStatusOverlay(null);
 
@@ -3650,6 +4430,7 @@ async function init() {
       markComplete("traffic");
       markActive("structure");
       markActive("candidates");
+      markActive("optimize");
       return;
     }
     markComplete("location");
@@ -3691,6 +4472,7 @@ async function init() {
       updateInspectPanel();
     }
     updateWorkflowSteps(state.mode);
+    updateOptimizationControls();
     updateDebugHud();
   };
 
@@ -3767,6 +4549,7 @@ async function init() {
     refreshWorkflowUI();
     updateDebugHud();
     syncThreeViewState();
+    updateMlDetectButton();
   };
 
   const unlockFrameForSearch = () => {
@@ -3972,7 +4755,7 @@ async function init() {
     topographyError = null;
     updateStructureBaseElevation(null);
     topographyGrid = null;
-    actionControls.setTopographyReady(false);
+    updateOptimizationControls();
     const { frame, gridRows, gridCols } = buildMapFrame(mapView, bounds, settings);
     ensureGeoProjector(bounds, { width: frame.width, height: frame.height });
     ensureBaseImageSize(frame.width, frame.height);
@@ -4053,7 +4836,7 @@ async function init() {
         applyTrafficData();
         updateEpicenterUI();
       }
-      actionControls.setTopographyReady(progress.coverage >= TOPO_MIN_COVERAGE_ENABLE);
+      updateOptimizationControls();
       updateProgressUi();
       updateContoursThrottled();
     };
@@ -4097,7 +4880,7 @@ async function init() {
       if (mapperSnapshot) {
         drawingManager.setContours(generateContourSegments(mapperSnapshot, 1));
       }
-      actionControls.setTopographyReady(topographyCoverage >= TOPO_MIN_COVERAGE_ENABLE);
+      updateOptimizationControls();
       applyRoadMode();
       applyTrafficData();
       topographyGrid = resolvedGrid;
@@ -4129,7 +4912,7 @@ async function init() {
       updateStructureBaseElevation(null);
       topographyGrid = null;
       threeView.setTerrain(null, null);
-      actionControls.setTopographyReady(false);
+      updateOptimizationControls();
       applyRoadMode();
       applyTrafficData();
       updateEpicenterUI();
@@ -4231,16 +5014,14 @@ function setupSettings(
   const viewDistance = document.getElementById("viewDistance") as HTMLInputElement | null;
   const topoSpacing = document.getElementById("topoSpacing") as HTMLInputElement | null;
   const sampleStep = document.getElementById("sampleStep") as HTMLInputElement | null;
+  const forestK = document.getElementById("forestK") as HTMLInputElement | null;
+  const denseCoverDensity = document.getElementById(
+    "denseCoverDensity"
+  ) as HTMLSelectElement | null;
   const toggleViewers = document.getElementById("toggleViewers") as HTMLInputElement | null;
   const toggleCandidates = document.getElementById("toggleCandidates") as HTMLInputElement | null;
   const toggleObstacles = document.getElementById("toggleObstacles") as HTMLInputElement | null;
   const toggleContours = document.getElementById("toggleContours") as HTMLInputElement | null;
-  const viewerOpacityInput = document.getElementById("viewerOpacity") as HTMLInputElement | null;
-  const candidateOpacityInput = document.getElementById("candidateOpacity") as HTMLInputElement | null;
-  const obstacleOpacityInput = document.getElementById("obstacleOpacity") as HTMLInputElement | null;
-  const heatmapOpacityInput = document.getElementById("heatmapOpacity") as HTMLInputElement | null;
-  const shadingOpacityInput = document.getElementById("shadingOpacity") as HTMLInputElement | null;
-  const contourOpacityInput = document.getElementById("contourOpacity") as HTMLInputElement | null;
 
   if (
     !siteHeight ||
@@ -4252,12 +5033,8 @@ function setupSettings(
     !toggleCandidates ||
     !toggleObstacles ||
     !toggleContours ||
-    !viewerOpacityInput ||
-    !candidateOpacityInput ||
-    !obstacleOpacityInput ||
-    !heatmapOpacityInput ||
-    !shadingOpacityInput ||
-    !contourOpacityInput
+    !forestK ||
+    !denseCoverDensity
   ) {
     throw new Error("Settings inputs missing from DOM");
   }
@@ -4273,13 +5050,22 @@ function setupSettings(
     settings.viewDistanceFt = Math.max(0, ensureNumber(viewDistance, settings.viewDistanceFt));
     settings.topoSpacingFt = Math.max(5, ensureNumber(topoSpacing, settings.topoSpacingFt));
     settings.sampleStepPx = Math.max(1, ensureNumber(sampleStep, settings.sampleStepPx));
+    settings.forestK = Math.max(0, ensureNumber(forestK, settings.forestK));
+    const densityValue = Number.parseFloat(denseCoverDensity.value);
+    settings.denseCoverDensity = clamp(
+      Number.isFinite(densityValue) ? densityValue : settings.denseCoverDensity,
+      0,
+      1
+    );
+    drawingManager.setDenseCoverDensity(settings.denseCoverDensity);
     hooks?.interruptComputations?.();
     hooks?.onSettingsChanged?.();
   };
 
-  [siteHeight, viewerHeight, viewDistance, topoSpacing, sampleStep].forEach((input) => {
+  [siteHeight, viewerHeight, viewDistance, topoSpacing, sampleStep, forestK].forEach((input) => {
     input.addEventListener("input", updateSettings);
   });
+  denseCoverDensity.addEventListener("change", updateSettings);
 
   const updateOverlayState = () => {
     settings.overlays.showViewers = toggleViewers.checked;
@@ -4298,39 +5084,8 @@ function setupSettings(
   toggleObstacles.addEventListener("change", updateOverlayState);
   toggleContours.addEventListener("change", updateOverlayState);
 
-  const parseAlpha = (input: HTMLInputElement, fallback: number) => {
-    const value = Number.parseFloat(input.value);
-    return Number.isFinite(value) ? value : fallback;
-  };
-
-  const updateOpacity = () => {
-    settings.opacity.viewer = parseAlpha(viewerOpacityInput, settings.opacity.viewer);
-    settings.opacity.candidate = parseAlpha(candidateOpacityInput, settings.opacity.candidate);
-    settings.opacity.obstacle = parseAlpha(obstacleOpacityInput, settings.opacity.obstacle);
-    settings.opacity.heatmap = parseAlpha(heatmapOpacityInput, settings.opacity.heatmap);
-    settings.opacity.shading = parseAlpha(shadingOpacityInput, settings.opacity.shading);
-    settings.opacity.contours = parseAlpha(contourOpacityInput, settings.opacity.contours);
-    drawingManager.setZoneOpacity("viewer", settings.opacity.viewer);
-    drawingManager.setZoneOpacity("candidate", settings.opacity.candidate);
-    drawingManager.setZoneOpacity("obstacle", settings.opacity.obstacle);
-    drawingManager.setHeatmapOpacity(settings.opacity.heatmap);
-    drawingManager.setShadingOpacity(settings.opacity.shading);
-    drawingManager.setContourOpacity(settings.opacity.contours);
-    hooks?.interruptComputations?.();
-  };
-
-  [
-    viewerOpacityInput,
-    candidateOpacityInput,
-    obstacleOpacityInput,
-    heatmapOpacityInput,
-    shadingOpacityInput,
-    contourOpacityInput
-  ].forEach((input) => input.addEventListener("input", updateOpacity));
-
   updateSettings();
   updateOverlayState();
-  updateOpacity();
   applyDisplaySettingsToCanvas(drawingManager, settings);
 }
 
@@ -4354,9 +5109,17 @@ function setupStructureControls(
 
   const updateStructure = () => {
     const wasCentered = structure.placeAtCenter;
-    structure.heightFt = ensurePositive(inputs.height, structure.heightFt);
-    structure.footprint.widthFt = ensurePositive(inputs.width, structure.footprint.widthFt);
-    structure.footprint.lengthFt = ensurePositive(inputs.length, structure.footprint.lengthFt);
+    if (structure.mode !== "imported") {
+      const heightFt = ensurePositive(
+        inputs.height,
+        Math.max(1, structure.heightMeters * METERS_TO_FEET)
+      );
+      const legacy = getStructureLegacyDimensions(structure);
+      const widthFt = ensurePositive(inputs.width, legacy.widthFt);
+      const lengthFt = ensurePositive(inputs.length, legacy.lengthFt);
+      structure.heightMeters = heightFt * FEET_TO_METERS;
+      applyStructureLegacyDimensions(structure, widthFt, lengthFt);
+    }
     structure.placeAtCenter = inputs.centered.checked;
     if (structure.placeAtCenter !== wasCentered) {
       hooks?.onCenteredChange?.(structure.placeAtCenter);
@@ -4372,335 +5135,25 @@ function setupStructureControls(
   updateStructure();
 }
 
-function setupActions(
+function setupProjectActions(
   drawingManager: ReturnType<typeof createDrawingManager>,
   settings: AppSettings,
-  getMapper: () => GeoMapper | null,
-  getTopographyCoverage: () => number,
   statusMessage: HTMLElement,
-  getVisibilitySources: () => {
-    buildings: Building[];
-    trees: Tree[];
-    signs: Sign[];
-    trafficViewerSamples: TrafficSimResult["viewerSamples"] | null;
-  },
   hooks?: {
-    onShadingComplete?: () => void;
-    setVisibilityComputing?: (active: boolean) => void;
     buildProjectState?: () => RuntimeProjectState;
     buildProjectPayload?: () => Record<string, unknown>;
     applyProjectState?: (project: RuntimeProjectState, extras?: ProjectExtras) => void;
     scheduleAutosave?: () => void;
   }
-): { cancelHeatmap: () => void; setTopographyReady: (ready: boolean) => void } {
-  let heatmapComputeToken = 0;
-  let visibilityComputeDepth = 0;
-  let topographyReady = false;
-
-  const setComputeActive = (active: boolean) => {
-    if (active) {
-      visibilityComputeDepth += 1;
-      if (visibilityComputeDepth === 1) {
-        hooks?.setVisibilityComputing?.(true);
-      }
-      return;
-    }
-    visibilityComputeDepth = Math.max(0, visibilityComputeDepth - 1);
-    if (visibilityComputeDepth === 0) {
-      hooks?.setVisibilityComputing?.(false);
-    }
-  };
-  const btnCompute = document.getElementById("btnComputeHeatmap") as HTMLButtonElement | null;
-  const btnComputeShade = document.getElementById("btnComputeShading") as HTMLButtonElement | null;
-  const btnClearHeatmap = document.getElementById("btnClearHeatmap") as HTMLButtonElement | null;
-  const btnClearShading = document.getElementById("btnClearShading") as HTMLButtonElement | null;
-  const btnClearShapes = document.getElementById("btnClearShapes") as HTMLButtonElement | null;
+) {
   const btnExport = document.getElementById("btnExportProject") as HTMLButtonElement | null;
   const importInput = document.getElementById("importFile") as HTMLInputElement | null;
   const btnExportShapes = document.getElementById("btnExportShapes") as HTMLButtonElement | null;
   const importShapesInput = document.getElementById("importShapesFile") as HTMLInputElement | null;
-  const progressContainer = document.getElementById("progressContainer") as HTMLElement | null;
-  const progressBar = document.getElementById("computeProgress") as HTMLProgressElement | null;
-  const progressLabel = document.getElementById("progressLabel") as HTMLElement | null;
 
-  if (
-    !btnCompute ||
-    !btnComputeShade ||
-    !btnClearHeatmap ||
-    !btnClearShading ||
-    !btnClearShapes ||
-    !btnExport ||
-    !importInput ||
-    !btnExportShapes ||
-    !importShapesInput ||
-    !progressContainer ||
-    !progressBar ||
-    !progressLabel
-  ) {
-    throw new Error("Control buttons missing from DOM");
+  if (!btnExport || !importInput || !btnExportShapes || !importShapesInput) {
+    throw new Error("Project actions missing from DOM");
   }
-
-  const showProgress = (label: string) => {
-    progressLabel.textContent = label;
-    progressBar.value = 0;
-    progressContainer.classList.remove("hidden");
-  };
-  const updateProgress = (value: number) => {
-    progressBar.value = Math.min(1, Math.max(0, value));
-  };
-  const hideProgress = () => {
-    progressContainer.classList.add("hidden");
-  };
-
-  const readTopographyStatus = () => {
-    const coverage = Math.max(0, Math.min(1, getTopographyCoverage()));
-    if (coverage < TOPO_MIN_COVERAGE_ENABLE) {
-      statusMessage.textContent = `Terrain still loading (${Math.round(
-        coverage * 100
-      )}%). Wait for more coverage.`;
-      return null;
-    }
-    return { coverage, approx: coverage < TOPO_APPROX_COVERAGE };
-  };
-
-  const cancelHeatmap = () => {
-    heatmapComputeToken += 1;
-    hideProgress();
-    btnCompute.disabled = !topographyReady;
-  };
-
-  btnCompute.addEventListener("click", async () => {
-    const mapper = getMapper();
-    if (!mapper) {
-      statusMessage.textContent = "Load topography before computing visibility.";
-      return;
-    }
-    const topoStatus = readTopographyStatus();
-    if (!topoStatus) {
-      return;
-    }
-    let computeActive = false;
-    const startCompute = () => {
-      if (computeActive) {
-        return;
-      }
-      computeActive = true;
-      setComputeActive(true);
-    };
-    const stopCompute = () => {
-      if (!computeActive) {
-        return;
-      }
-      computeActive = false;
-      setComputeActive(false);
-    };
-    const approx = topoStatus.approx;
-    startCompute();
-    btnCompute.disabled = true;
-    showProgress(approx ? "Running analysis (approx)…" : "Running analysis…");
-    statusMessage.textContent = approx
-      ? "Building occlusion grid (approx)…"
-      : "Building occlusion grid…";
-    await delayFrame();
-    try {
-      heatmapComputeToken += 1;
-      const token = heatmapComputeToken;
-      const shapes = drawingManager.getShapes();
-      const visibilitySources = getVisibilitySources();
-      const passSteps = buildPassSteps(Math.max(1, settings.sampleStepPx), mapper.geo.image);
-      const obstaclesSnapshot = shapes.filter(
-        (shape) => shape.type === "obstacle" && shape.visible !== false
-      );
-      const combinedGrid = buildCombinedHeightGrid(mapper, {
-        buildings: visibilitySources.buildings,
-        trees: visibilitySources.trees,
-        signs: visibilitySources.signs,
-        obstacles: obstaclesSnapshot
-      });
-      const trafficViewers = buildTrafficViewerSamples(
-        visibilitySources.trafficViewerSamples,
-        mapper
-      );
-      updateProgress(0.05);
-      statusMessage.textContent = approx
-        ? "Computing visibility heatmap (approx)…"
-        : "Computing visibility heatmap…";
-
-      for (let i = 0; i < passSteps.length; i += 1) {
-        if (token !== heatmapComputeToken) {
-          hideProgress();
-          btnCompute.disabled = !topographyReady;
-          return;
-        }
-        const step = passSteps[i];
-        const tempSettings = withSampleResolution(settings, step);
-        const viewers = sampleViewerPoints(shapes, tempSettings, mapper).concat(trafficViewers);
-        const candidates = sampleCandidatePoints(shapes, tempSettings, mapper);
-        if (viewers.length === 0 || candidates.length === 0) {
-          statusMessage.textContent =
-            viewers.length === 0
-              ? "Need viewer zones or traffic samples to compute heatmap."
-              : "Need candidate zones to compute heatmap.";
-          drawingManager.clearHeatmap();
-          drawingManager.setShading(null, step);
-          hideProgress();
-          btnCompute.disabled = !topographyReady;
-          return;
-        }
-        const heatmap = computeVisibilityHeatmap(
-          viewers,
-          candidates,
-          combinedGrid,
-          tempSettings,
-          mapper
-        );
-        if (token !== heatmapComputeToken) {
-          hideProgress();
-          btnCompute.disabled = !topographyReady;
-          return;
-        }
-        drawingManager.setHeatmap(heatmap, Math.max(1, tempSettings.sampleStepPx));
-        progressLabel.textContent = `Computing heatmap (pass ${i + 1}/${passSteps.length})…`;
-        updateProgress((i + 1) / passSteps.length);
-        await delayFrame();
-      }
-
-      hideProgress();
-      statusMessage.textContent = approx
-        ? "Heatmap computation complete (approx)."
-        : "Heatmap computation complete.";
-    } catch (err) {
-      console.error(err);
-      statusMessage.textContent = `Heatmap error: ${(err as Error).message}`;
-      hideProgress();
-    } finally {
-      stopCompute();
-      btnCompute.disabled = !topographyReady;
-    }
-  });
-
-  btnComputeShade.addEventListener("click", async () => {
-    const mapper = getMapper();
-    if (!mapper) {
-      statusMessage.textContent = "Load topography before computing blindspots.";
-      return;
-    }
-    const topoStatus = readTopographyStatus();
-    if (!topoStatus) {
-      return;
-    }
-    let computeActive = false;
-    const startCompute = () => {
-      if (computeActive) {
-        return;
-      }
-      computeActive = true;
-      setComputeActive(true);
-    };
-    const stopCompute = () => {
-      if (!computeActive) {
-        return;
-      }
-      computeActive = false;
-      setComputeActive(false);
-    };
-    const approx = topoStatus.approx;
-    startCompute();
-    btnComputeShade.disabled = true;
-    showProgress(approx ? "Computing blindspots (approx)…" : "Computing blindspots…");
-    statusMessage.textContent = approx
-      ? "Building occlusion grid (approx)…"
-      : "Building occlusion grid…";
-    await delayFrame();
-    try {
-      heatmapComputeToken += 1;
-      const token = heatmapComputeToken;
-      const shapes = drawingManager.getShapes();
-      const visibilitySources = getVisibilitySources();
-      const shadingSteps = buildPassSteps(Math.max(1, settings.sampleStepPx), mapper.geo.image);
-      const obstaclesSnapshot = shapes.filter(
-        (shape) => shape.type === "obstacle" && shape.visible !== false
-      );
-      const combinedGrid = buildCombinedHeightGrid(mapper, {
-        buildings: visibilitySources.buildings,
-        trees: visibilitySources.trees,
-        signs: visibilitySources.signs,
-        obstacles: obstaclesSnapshot
-      });
-      const trafficViewers = buildTrafficViewerSamples(
-        visibilitySources.trafficViewerSamples,
-        mapper
-      );
-      updateProgress(0.05);
-      statusMessage.textContent = approx
-        ? "Computing blindspot visibility (approx)…"
-        : "Computing blindspot visibility…";
-      for (let i = 0; i < shadingSteps.length; i += 1) {
-        if (token !== heatmapComputeToken) {
-          hideProgress();
-          btnComputeShade.disabled = !topographyReady;
-          return;
-        }
-        const step = shadingSteps[i];
-        const tempSettings = withSampleResolution(settings, step);
-        const viewers = sampleViewerPoints(shapes, tempSettings, mapper).concat(trafficViewers);
-        if (viewers.length === 0) {
-          drawingManager.setShading(null, step);
-          statusMessage.textContent =
-            "Need at least one viewer zone or traffic sample to compute blindspots.";
-          hideProgress();
-          btnComputeShade.disabled = !topographyReady;
-          return;
-        }
-        const mapSamples = sampleMapGridPoints(tempSettings, mapper);
-        const shadingCells = computeShadingOverlay(
-          viewers,
-          mapSamples,
-          combinedGrid,
-          tempSettings,
-          mapper
-        );
-        if (token !== heatmapComputeToken) {
-          hideProgress();
-          btnComputeShade.disabled = !topographyReady;
-          return;
-        }
-        drawingManager.setShading(shadingCells, Math.max(1, tempSettings.sampleStepPx));
-        progressLabel.textContent = `Computing shademap (pass ${i + 1}/${shadingSteps.length})…`;
-        updateProgress((i + 1) / shadingSteps.length);
-        await delayFrame();
-      }
-      hideProgress();
-      statusMessage.textContent = approx
-        ? "Blindspot computation complete (approx)."
-        : "Blindspot computation complete.";
-      hooks?.onShadingComplete?.();
-    } catch (err) {
-      console.error(err);
-      statusMessage.textContent = `Shademap error: ${(err as Error).message}`;
-      hideProgress();
-    } finally {
-      stopCompute();
-      btnComputeShade.disabled = !topographyReady;
-    }
-  });
-
-  btnClearHeatmap.addEventListener("click", () => {
-    drawingManager.clearHeatmap();
-    statusMessage.textContent = "Heatmap cleared.";
-  });
-
-  btnClearShading.addEventListener("click", () => {
-    drawingManager.setShading(null, Math.max(2, Math.floor(settings.sampleStepPx)));
-    statusMessage.textContent = "Blindspot map cleared.";
-  });
-
-  btnClearShapes.addEventListener("click", () => {
-    drawingManager.clearShapes();
-    drawingManager.clearHeatmap();
-    drawingManager.setShading(null, Math.max(2, Math.floor(settings.sampleStepPx)));
-    statusMessage.textContent = "All shapes removed.";
-  });
 
   btnExport.addEventListener("click", () => {
     const projectState = hooks?.buildProjectState
@@ -4799,14 +5252,6 @@ function setupActions(
       importShapesInput.value = "";
     }
   });
-
-  const setTopographyReady = (ready: boolean) => {
-    topographyReady = ready;
-    btnCompute.disabled = !ready;
-    btnComputeShade.disabled = !ready;
-  };
-
-  return { cancelHeatmap, setTopographyReady };
 }
 
 function setupDebugProbe(
@@ -4843,6 +5288,10 @@ function applySettingsFromImport(source: Partial<AppSettings>, target: AppSettin
   if (typeof source.viewDistanceFt === "number") target.viewDistanceFt = source.viewDistanceFt;
   if (typeof source.topoSpacingFt === "number") target.topoSpacingFt = source.topoSpacingFt;
   if (typeof source.sampleStepPx === "number") target.sampleStepPx = Math.max(1, source.sampleStepPx);
+  if (typeof source.forestK === "number") target.forestK = Math.max(0, source.forestK);
+  if (typeof source.denseCoverDensity === "number") {
+    target.denseCoverDensity = clamp(source.denseCoverDensity, 0, 1);
+  }
   if (source.frame) {
     if (typeof source.frame.maxSideFt === "number") {
       target.frame.maxSideFt = source.frame.maxSideFt;
@@ -4874,12 +5323,8 @@ function refreshSettingInputs(settings: AppSettings) {
     viewDistance: settings.viewDistanceFt.toString(),
     topoSpacing: settings.topoSpacingFt.toString(),
     sampleStep: settings.sampleStepPx.toString(),
-    viewerOpacity: settings.opacity.viewer.toString(),
-    candidateOpacity: settings.opacity.candidate.toString(),
-    obstacleOpacity: settings.opacity.obstacle.toString(),
-    heatmapOpacity: settings.opacity.heatmap.toString(),
-    shadingOpacity: settings.opacity.shading.toString(),
-    contourOpacity: settings.opacity.contours.toString()
+    forestK: settings.forestK.toString(),
+    denseCoverDensity: settings.denseCoverDensity.toString()
   };
   Object.entries(map).forEach(([id, value]) => {
     const input = document.getElementById(id) as HTMLInputElement | null;
@@ -4902,15 +5347,17 @@ function refreshSettingInputs(settings: AppSettings) {
 }
 
 function refreshStructureInputs(structure: StructureParams) {
+  const legacy = getStructureLegacyDimensions(structure);
   const map: Record<string, string> = {
-    structureHeight: structure.heightFt.toString(),
-    structureWidth: structure.footprint.widthFt.toString(),
-    structureLength: structure.footprint.lengthFt.toString()
+    structureHeight: (structure.heightMeters * METERS_TO_FEET).toString(),
+    structureWidth: legacy.widthFt.toString(),
+    structureLength: legacy.lengthFt.toString()
   };
   Object.entries(map).forEach(([id, value]) => {
     const input = document.getElementById(id) as HTMLInputElement | null;
     if (input) {
       input.value = value;
+      input.disabled = structure.mode === "imported";
     }
   });
   const centered = document.getElementById("structureCentered") as HTMLInputElement | null;
@@ -4927,6 +5374,7 @@ function friendlyToolName(tool: ToolMode): string {
     drawCandidatePolygon: "Candidate Polygon",
     drawObstaclePolygon: "Obstacle Polygon",
     drawObstacleEllipse: "Obstacle Ellipse",
+    drawDenseCoverPolygon: "Dense Cover Polygon",
     placeTreePine: "Place Pine Tree",
     placeTreeDeciduous: "Place Deciduous Tree",
     placeSign: "Place Sign/Billboard",
@@ -5001,6 +5449,8 @@ function createDefaultSettings(): AppSettings {
     viewDistanceFt: 2000,
     topoSpacingFt: 25,
     sampleStepPx: 5,
+    forestK: 0.04,
+    denseCoverDensity: 0.6,
     frame: {
       maxSideFt: 2640,
       minSideFt: 300
@@ -5022,16 +5472,93 @@ function createDefaultSettings(): AppSettings {
   };
 }
 
-function createDefaultStructure(): StructureParams {
+function isValidFootprint(points: { x: number; y: number }[] | undefined): boolean {
+  if (!points || points.length < 3) {
+    return false;
+  }
+  return points.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+}
+
+function buildRectFootprintPoints(widthFt: number, lengthFt: number): { x: number; y: number }[] {
+  const widthM = Math.max(1, widthFt) * FEET_TO_METERS;
+  const lengthM = Math.max(1, lengthFt) * FEET_TO_METERS;
+  const halfWidth = Math.max(0.1, widthM / 2);
+  const halfLength = Math.max(0.1, lengthM / 2);
+  return [
+    { x: -halfWidth, y: -halfLength },
+    { x: halfWidth, y: -halfLength },
+    { x: halfWidth, y: halfLength },
+    { x: -halfWidth, y: halfLength }
+  ];
+}
+
+function getFootprintBounds(points: { x: number; y: number }[]): { widthM: number; lengthM: number } {
+  if (!points || points.length === 0) {
+    return { widthM: 0, lengthM: 0 };
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  points.forEach((point) => {
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  });
+  return { widthM: Math.max(0, maxX - minX), lengthM: Math.max(0, maxY - minY) };
+}
+
+function getStructureLegacyDimensions(structure: StructureParams): {
+  widthFt: number;
+  lengthFt: number;
+} {
+  const widthFt = Number.isFinite(structure.legacyWidthFt)
+    ? Math.max(1, structure.legacyWidthFt as number)
+    : undefined;
+  const lengthFt = Number.isFinite(structure.legacyLengthFt)
+    ? Math.max(1, structure.legacyLengthFt as number)
+    : undefined;
+  if (widthFt && lengthFt) {
+    return { widthFt, lengthFt };
+  }
+  if (!isValidFootprint(structure.footprint.points)) {
+    return { widthFt: 60, lengthFt: 90 };
+  }
+  const bounds = getFootprintBounds(structure.footprint.points);
   return {
-    heightFt: 30,
+    widthFt: Math.max(1, bounds.widthM * METERS_TO_FEET),
+    lengthFt: Math.max(1, bounds.lengthM * METERS_TO_FEET)
+  };
+}
+
+function applyStructureLegacyDimensions(
+  structure: StructureParams,
+  widthFt: number,
+  lengthFt: number
+) {
+  const normalizedWidth = Math.max(1, widthFt);
+  const normalizedLength = Math.max(1, lengthFt);
+  structure.legacyWidthFt = normalizedWidth;
+  structure.legacyLengthFt = normalizedLength;
+  structure.footprint.points = buildRectFootprintPoints(normalizedWidth, normalizedLength);
+}
+
+function createDefaultStructure(): StructureParams {
+  const legacyWidthFt = 60;
+  const legacyLengthFt = 90;
+  return {
+    version: 2,
+    mode: "parametric",
     footprint: {
-      widthFt: 60,
-      lengthFt: 90
+      points: buildRectFootprintPoints(legacyWidthFt, legacyLengthFt)
     },
+    heightMeters: 30 * FEET_TO_METERS,
     placeAtCenter: true,
     centerPx: { x: 0, y: 0 },
-    rotationDeg: 0
+    rotationDeg: 0,
+    legacyWidthFt,
+    legacyLengthFt
   };
 }
 
@@ -5363,12 +5890,16 @@ function applyTrafficResultsToRoads(
   }
 }
 
-function formatTrafficMeta(meta?: TrafficSimResult["meta"] | null): string {
+function formatTrafficMeta(
+  meta?: TrafficSimResult["meta"] | null,
+  capMessage?: string | null
+): string {
   if (!meta) {
     return "Traffic computed.";
   }
   const duration = meta.durationMs ? `${(meta.durationMs / 1000).toFixed(1)}s` : "–";
-  return `Traffic computed · trips ${meta.trips} · k ${meta.kRoutes} · ${duration}`;
+  const base = `Traffic computed · trips ${meta.trips} · k ${meta.kRoutes} · ${duration}`;
+  return capMessage ? `${base} · ${capMessage}` : base;
 }
 
 function formatTrafficDetail(detail: number): string {
@@ -5450,6 +5981,99 @@ function mapPointToLatLon(
   return { lat, lon };
 }
 
+const TRAFFIC_ROAD_PRIORITY: Record<string, number> = {
+  motorway: 9,
+  trunk: 8,
+  primary: 7,
+  secondary: 6,
+  tertiary: 5,
+  residential: 4,
+  unclassified: 4,
+  living_street: 3,
+  service: 3,
+  motorway_link: 6,
+  trunk_link: 6,
+  primary_link: 6,
+  secondary_link: 5,
+  tertiary_link: 4,
+  track: 2,
+  path: 2,
+  cycleway: 2,
+  footway: 1,
+  pedestrian: 1,
+  construction: 1,
+  other: 1
+};
+
+function pointInGeoBounds(point: { lat: number; lon: number }, bounds: GeoBounds): boolean {
+  return (
+    point.lat >= bounds.south &&
+    point.lat <= bounds.north &&
+    point.lon >= bounds.west &&
+    point.lon <= bounds.east
+  );
+}
+
+function estimateTrafficEdgeCount(roads: TrafficSimRequest["roads"]): number {
+  let count = 0;
+  for (const road of roads) {
+    if (!road.points || road.points.length < 2) {
+      continue;
+    }
+    const segments = road.points.length - 1;
+    const oneway =
+      road.oneway === true || road.oneway === 1 || road.oneway === -1;
+    count += segments * (oneway ? 1 : 2);
+  }
+  return count;
+}
+
+function capTrafficRoadsByEdgeCount(
+  roads: TrafficSimRequest["roads"],
+  frameBounds: GeoBounds,
+  maxEdges: number
+): {
+  roads: TrafficSimRequest["roads"];
+  capped: boolean;
+  keptEdges: number;
+  totalEdges: number;
+} {
+  const totalEdges = estimateTrafficEdgeCount(roads);
+  if (totalEdges <= maxEdges) {
+    return { roads, capped: false, keptEdges: totalEdges, totalEdges };
+  }
+
+  const ranked = roads.map((road) => {
+    const classKey = road.class ?? "other";
+    const priority = TRAFFIC_ROAD_PRIORITY[classKey] ?? 4;
+    const inFrame = road.points.some((point) => pointInGeoBounds(point, frameBounds));
+    const edgeCount = estimateTrafficEdgeCount([road]);
+    return { road, priority, inFrame, edgeCount };
+  });
+
+  ranked.sort((a, b) => {
+    if (a.inFrame !== b.inFrame) {
+      return a.inFrame ? -1 : 1;
+    }
+    if (a.priority !== b.priority) {
+      return b.priority - a.priority;
+    }
+    return a.road.id.localeCompare(b.road.id);
+  });
+
+  const selected: TrafficSimRequest["roads"] = [];
+  let keptEdges = 0;
+  for (const entry of ranked) {
+    if (keptEdges + entry.edgeCount > maxEdges) {
+      continue;
+    }
+    selected.push(entry.road);
+    keptEdges += entry.edgeCount;
+  }
+
+  return { roads: selected, capped: true, keptEdges, totalEdges };
+}
+
 function buildTrafficRoads(
   roads: Road[],
   mapper: GeoMapper | null
@@ -5476,7 +6100,10 @@ function buildTrafficRoads(
       lanes: road.lanes,
       lanesForward: road.lanesForward,
       lanesBackward: road.lanesBackward,
-      lanesInferred: road.lanesInferred
+      lanesInferred: road.lanesInferred,
+      turnLanes: road.turnLanes,
+      turnLanesForward: road.turnLanesForward,
+      turnLanesBackward: road.turnLanesBackward
     });
   }
   return trafficRoads;
@@ -5572,6 +6199,9 @@ function mapOsmRoad(road: OsmRoad): Road {
     lanesForward: road.lanesForward,
     lanesBackward: road.lanesBackward,
     lanesInferred: road.lanesInferred,
+    turnLanes: road.turnLanes,
+    turnLanesForward: road.turnLanesForward,
+    turnLanesBackward: road.turnLanesBackward,
     name: road.name,
     source: "osm",
     showDirectionLine: road.showDirectionLine ?? false
@@ -5852,6 +6482,75 @@ function createFeatureId(prefix: string): string {
   return `${prefix}:${Date.now().toString(36)}:${random}`;
 }
 
+function projectLatLonForMl(lat: number, lon: number, zoom: number): { x: number; y: number } {
+  const sinLat = Math.sin((lat * Math.PI) / 180);
+  const scale = 256 * Math.pow(2, zoom);
+  const x = ((lon + 180) / 360) * scale;
+  const y = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale;
+  return { x, y };
+}
+
+function unprojectLatLonForMl(x: number, y: number, zoom: number): { lat: number; lon: number } {
+  const scale = 256 * Math.pow(2, zoom);
+  const lon = (x / scale) * 360 - 180;
+  const n = Math.PI - (2 * Math.PI * y) / scale;
+  const lat = (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  return { lat, lon };
+}
+
+function metersPerPixelAtLatForMl(lat: number, zoom: number): number {
+  const latRad = (lat * Math.PI) / 180;
+  const circumference = 2 * Math.PI * 6378137;
+  return (Math.cos(latRad) * circumference) / (256 * Math.pow(2, zoom));
+}
+
+function applyMlNms<
+  T extends PatchPrediction & { worldCx: number; worldCy: number; worldW: number; worldH: number }
+>(detections: T[], iouThreshold: number): T[] {
+  const byClass = new Map<string, T[]>();
+  detections.forEach((detection) => {
+    const list = byClass.get(detection.class) ?? [];
+    list.push(detection);
+    byClass.set(detection.class, list);
+  });
+  const results: T[] = [];
+  byClass.forEach((list) => {
+    list.sort((a, b) => b.confidence - a.confidence);
+    const kept: T[] = [];
+    list.forEach((candidate) => {
+      const overlaps = kept.some((existing) => mlIou(candidate, existing) > iouThreshold);
+      if (!overlaps) {
+        kept.push(candidate);
+      }
+    });
+    results.push(...kept);
+  });
+  return results;
+}
+
+function mlIou(
+  a: PatchPrediction & { worldCx: number; worldCy: number; worldW: number; worldH: number },
+  b: PatchPrediction & { worldCx: number; worldCy: number; worldW: number; worldH: number }
+): number {
+  const aMinX = a.worldCx - a.worldW / 2;
+  const aMinY = a.worldCy - a.worldH / 2;
+  const aMaxX = a.worldCx + a.worldW / 2;
+  const aMaxY = a.worldCy + a.worldH / 2;
+  const bMinX = b.worldCx - b.worldW / 2;
+  const bMinY = b.worldCy - b.worldH / 2;
+  const bMaxX = b.worldCx + b.worldW / 2;
+  const bMaxY = b.worldCy + b.worldH / 2;
+  const interW = Math.max(0, Math.min(aMaxX, bMaxX) - Math.max(aMinX, bMinX));
+  const interH = Math.max(0, Math.min(aMaxY, bMaxY) - Math.max(aMinY, bMinY));
+  const interArea = interW * interH;
+  if (interArea <= 0) {
+    return 0;
+  }
+  const areaA = a.worldW * a.worldH;
+  const areaB = b.worldW * b.worldH;
+  return interArea / (areaA + areaB - interArea);
+}
+
 function capBoundsByMeters(bounds: GeoBounds, maxWidthM: number, maxHeightM: number): GeoBounds {
   const latMid = (bounds.north + bounds.south) / 2;
   const lonMid = (bounds.east + bounds.west) / 2;
@@ -6000,6 +6699,7 @@ function loadAutosave(): LoadedProject | null {
         basemapId: basemap,
         settings: parsed.settings as AppSettings,
         shapes: parsed.shapes as Shape[],
+        denseCover: Array.isArray(parsed.denseCover) ? (parsed.denseCover as DenseCover[]) : [],
         roadMode: "auto",
         autoData: {
           bounds: null,
@@ -6056,6 +6756,7 @@ function applyDisplaySettingsToCanvas(
   drawingManager.setHeatmapOpacity(settings.opacity.heatmap);
   drawingManager.setShadingOpacity(settings.opacity.shading);
   drawingManager.setContourOpacity(settings.opacity.contours);
+  drawingManager.setDenseCoverDensity(settings.denseCoverDensity);
 }
 
 function buildPassSteps(

@@ -36,6 +36,9 @@ export interface Road {
   lanesForward?: number;
   lanesBackward?: number;
   lanesInferred?: boolean;
+  turnLanes?: string;
+  turnLanesForward?: string;
+  turnLanesBackward?: string;
   name?: string;
   showDirectionLine: boolean;
   traffic: RoadTraffic;

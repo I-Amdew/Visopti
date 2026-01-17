@@ -42,6 +42,9 @@ export interface Road {
   lanesForward?: number;
   lanesBackward?: number;
   lanesInferred?: boolean;
+  turnLanes?: string;
+  turnLanesForward?: string;
+  turnLanesBackward?: string;
 }
 
 export interface Building {
@@ -138,7 +141,13 @@ export interface TrafficEdgeTraffic {
 export interface TrafficViewerSample {
   lat: number;
   lon: number;
-  heading: number;
+  headingDeg: number;
   weight: number;
+  dwellFactor: number;
+  laneType: TrafficLaneType;
   speedMps?: number;
 }
+
+export type TurnDirection = "left" | "right" | "straight";
+
+export type TrafficLaneType = "through" | "turn_left" | "turn_right";

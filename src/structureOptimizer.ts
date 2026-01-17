@@ -1,4 +1,4 @@
-import type { AppSettings, Road, ViewerSample } from "./types";
+import type { AppSettings, FacePriorityArc, Road, ViewerSample } from "./types";
 import type { ElevationGrid, GeoMapper } from "./geo";
 import { distanceToPolyline, type Point } from "./roads/geometry";
 import { isVisible } from "./visibility";
@@ -46,7 +46,7 @@ export interface StructureOptimizationInput {
   mapper: GeoMapper;
   settings: AppSettings;
   roads?: StructureRoadInput[];
-  pinnedFaceId?: number | null;
+  facePriority?: FacePriorityArc | null;
   squareToRoad?: boolean;
   rotationStepDeg?: number;
   rotationRefineStepDeg?: number;
@@ -55,6 +55,7 @@ export interface StructureOptimizationInput {
   refineStepScale?: number;
   scoreMode?: StructureScoreMode;
   topN?: number;
+  signal?: AbortSignal;
 }
 
 export interface StructureOptimizationResult {
@@ -86,12 +87,16 @@ const MAJOR_ROAD_CLASSES = new Set<Road["class"]>([
 export function buildRectFootprintTemplate(widthPx: number, lengthPx: number): Point[] {
   const halfWidth = Math.max(0.5, widthPx / 2);
   const halfLength = Math.max(0.5, lengthPx / 2);
-  return [
+  return buildPolygonFootprintTemplate([
     { x: -halfWidth, y: -halfLength },
     { x: halfWidth, y: -halfLength },
     { x: halfWidth, y: halfLength },
     { x: -halfWidth, y: halfLength }
-  ];
+  ]);
+}
+
+export function buildPolygonFootprintTemplate(points: Point[]): Point[] {
+  return normalizeRing(points).map((point) => ({ x: point.x, y: point.y }));
 }
 
 export function transformFootprint(
@@ -152,6 +157,9 @@ export function labelFaceDirection(normal: Point): "N" | "E" | "S" | "W" {
 export function optimizeStructurePlacement(
   input: StructureOptimizationInput
 ): StructureOptimizationResult | null {
+  if (input.signal?.aborted) {
+    return null;
+  }
   const footprintTemplate = normalizeRing(input.footprintTemplate);
   if (footprintTemplate.length < 3) {
     return null;
@@ -200,8 +208,14 @@ export function optimizeStructurePlacement(
   }> = [];
 
   for (const candidate of candidates) {
+    if (input.signal?.aborted) {
+      return null;
+    }
     const { samples, step } = samplePointsInPolygon(candidate.points, placementSamples);
     for (const center of samples) {
+      if (input.signal?.aborted) {
+        return null;
+      }
       const placement = evaluatePlacement({
         center,
         candidatePoints: candidate.points,
@@ -212,7 +226,7 @@ export function optimizeStructurePlacement(
         mapper: input.mapper,
         settings: input.settings,
         roads: input.roads,
-        pinnedFaceId: input.pinnedFaceId ?? null,
+        facePriority: input.facePriority ?? null,
         squareToRoad: input.squareToRoad ?? false,
         rotationStepDeg,
         rotationRefineStepDeg,
@@ -266,7 +280,7 @@ export function optimizeStructurePlacement(
           mapper: input.mapper,
           settings: input.settings,
           roads: input.roads,
-          pinnedFaceId: input.pinnedFaceId ?? null,
+          facePriority: input.facePriority ?? null,
           squareToRoad: input.squareToRoad ?? false,
           rotationStepDeg,
           rotationRefineStepDeg,
@@ -297,12 +311,13 @@ type PlacementEvalInput = {
   mapper: GeoMapper;
   settings: AppSettings;
   roads?: StructureRoadInput[];
-  pinnedFaceId: number | null;
+  facePriority: FacePriorityArc | null;
   squareToRoad: boolean;
   rotationStepDeg: number;
   rotationRefineStepDeg: number;
   scoreMode: StructureScoreMode;
   topN: number;
+  signal?: AbortSignal;
 };
 
 function evaluatePlacement(input: PlacementEvalInput): StructurePlacementResult | null {
@@ -336,6 +351,9 @@ function evaluatePlacement(input: PlacementEvalInput): StructurePlacementResult 
     input.rotationRefineStepDeg
   );
   for (const rotationDeg of refineAngles) {
+    if (input.signal?.aborted) {
+      return null;
+    }
     const candidate = scorePlacement({
       ...input,
       rotationDeg
@@ -377,7 +395,7 @@ function scorePlacement(
     faceScores,
     input.scoreMode,
     input.topN,
-    input.pinnedFaceId
+    input.facePriority
   );
   return {
     center: { ...input.center },
@@ -521,20 +539,46 @@ function computeDistanceFactor(
   return clamp(1 - excess / maxDistanceFt, 0, 1);
 }
 
+export function resolveFacePriorityIndices(
+  faceCount: number,
+  facePriority: FacePriorityArc | null
+): number[] {
+  if (!facePriority || faceCount < 2) {
+    return [];
+  }
+  const mod = (index: number) => ((index % faceCount) + faceCount) % faceCount;
+  const primary = mod(facePriority.primaryEdgeIndex);
+  const next = mod(primary + 1);
+  const prev = mod(primary - 1);
+  let candidate: number[] = [];
+  if (facePriority.arcDeg === 180) {
+    candidate = faceCount <= 3 ? [primary, next] : [prev, primary, next];
+  } else {
+    const next2 = mod(primary + 2);
+    candidate = [primary, next, next2];
+  }
+  const unique = Array.from(new Set(candidate));
+  if (unique.length >= faceCount) {
+    return [primary, next].filter((index, idx, arr) => arr.indexOf(index) === idx);
+  }
+  return unique;
+}
+
 function computeTotalScore(
   faceScores: StructureFaceScore[],
   mode: StructureScoreMode,
   topN: number,
-  pinnedFaceId: number | null
+  facePriority: FacePriorityArc | null
 ): number {
   if (faceScores.length === 0) {
     return 0;
   }
-  if (pinnedFaceId !== null) {
-    const pinned = faceScores.find((entry) => entry.face.id === pinnedFaceId);
-    if (pinned) {
-      return pinned.score;
-    }
+  const prioritized = resolveFacePriorityIndices(faceScores.length, facePriority)
+    .map((index) => faceScores.find((entry) => entry.face.id === index))
+    .filter((entry): entry is StructureFaceScore => !!entry);
+  if (prioritized.length > 0) {
+    const total = prioritized.reduce((sum, entry) => sum + entry.score, 0);
+    return total / prioritized.length;
   }
   if (mode === "topN") {
     const sorted = [...faceScores].sort((a, b) => b.score - a.score);

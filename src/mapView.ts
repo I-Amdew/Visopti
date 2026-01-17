@@ -49,6 +49,7 @@ export function createMapView(container: HTMLElement): MapView {
     const layer = L.tileLayer(source.url, {
       maxZoom: source.maxZoom,
       attribution: source.attribution,
+      crossOrigin: "anonymous",
     });
     applyLayerOpacity(layer);
     layers.set(source.id, layer);

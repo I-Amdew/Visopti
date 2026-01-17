@@ -21,9 +21,10 @@ const MAX_OSM_TREES = 1500;
 
 type OverpassTags = Record<string, string>;
 
-export type RoadClassFilter = "all" | "major";
+export type RoadClassFilter = "all" | "major" | "major_connectors";
 
 const MAJOR_ROAD_REGEX = "^(motorway|trunk|primary|secondary)(_link)?$";
+const CONNECTOR_ROAD_REGEX = "^(tertiary|tertiary_link|unclassified)$";
 
 export interface OverpassNode {
   type: "node";
@@ -174,7 +175,12 @@ function buildOverpassQuery(
   const roadQuery =
     options.roadClassFilter === "major"
       ? `  way["highway"~"${MAJOR_ROAD_REGEX}"](${bbox});`
-      : `  way["highway"](${bbox});`;
+      : options.roadClassFilter === "major_connectors"
+        ? `  way["highway"~"${MAJOR_ROAD_REGEX}"](${bbox})->.majorWays;
+  node(w.majorWays)(${bbox})->.majorNodes;
+  way["highway"~"${CONNECTOR_ROAD_REGEX}"](bn.majorNodes)->.connectorWays;
+  (.majorWays; .connectorWays;);`
+        : `  way["highway"](${bbox});`;
   const buildingQuery = options.includeBuildings ? `  way["building"](${bbox});` : "";
   const signalQuery = options.includeTrafficSignals
     ? `  node["highway"="traffic_signals"](${bbox});`
@@ -290,6 +296,9 @@ export function parseOverpassPayload(payload: OverpassResponse): {
       const roadClass = mapRoadClass(highwayTag);
       const oneway = inferOneway(tags);
       const laneData = resolveLaneData(tags, roadClass, oneway);
+      const turnLanes = normalizeTurnLaneTag(tags["turn:lanes"]);
+      const turnLanesForward = normalizeTurnLaneTag(tags["turn:lanes:forward"]);
+      const turnLanesBackward = normalizeTurnLaneTag(tags["turn:lanes:backward"]);
       const road: Road = {
         id: `osm:way:${way.id}`,
         points,
@@ -299,6 +308,9 @@ export function parseOverpassPayload(payload: OverpassResponse): {
         lanesForward: laneData.lanesForward,
         lanesBackward: laneData.lanesBackward,
         lanesInferred: laneData.lanesInferred ? true : undefined,
+        turnLanes,
+        turnLanesForward,
+        turnLanesBackward,
         name: tags.name ?? tags.ref,
         showDirectionLine: SHOW_DIRECTION_DEFAULT,
         traffic: {
@@ -497,6 +509,14 @@ function resolveLaneData(
 
 // Lane parsing and inference are shared with the traffic simulation logic.
 
+function normalizeTurnLaneTag(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function parseHeightValue(raw: string | number | null | undefined): number | undefined {
   if (raw === null || raw === undefined) {
     return undefined;
@@ -576,7 +596,12 @@ function buildCacheTypesKey(options: {
   includeTrafficSignals: boolean;
   roadClassFilter: RoadClassFilter;
 }): string {
-  const roadKey = options.roadClassFilter === "major" ? "roads:major" : "roads:all";
+  const roadKey =
+    options.roadClassFilter === "major"
+      ? "roads:major"
+      : options.roadClassFilter === "major_connectors"
+        ? "roads:major_connectors"
+        : "roads:all";
   const buildingKey = options.includeBuildings ? "buildings" : "no_buildings";
   const obstacleKey = options.includeObstacles ? "obstacles" : "no_obstacles";
   const signalKey = options.includeTrafficSignals ? "signals" : "no_signals";

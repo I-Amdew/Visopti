@@ -2,6 +2,7 @@ import {
   AppSettings,
   Building,
   CandidateSample,
+  DenseCover,
   GeoPoint,
   HeatmapCell,
   MapPoint,
@@ -13,7 +14,7 @@ import {
 } from "./types";
 import { GeoMapper, type ElevationGrid } from "./geo";
 import { pointInShape } from "./drawing";
-import { inferBuildingHeightInfo } from "./world/height";
+import { resolveBuildingHeightInfo } from "./world/height";
 import { DEFAULT_SIGN_DIMENSIONS, deriveTreeHeightMeters } from "./obstacles";
 import type { TrafficViewerSample } from "./traffic/types";
 
@@ -27,6 +28,12 @@ type CombinedGridInput = {
   signs?: Sign[];
   obstacles?: Shape[];
   obstacleHeightM?: number;
+};
+
+type VisibilityOptions = {
+  denseCover?: DenseCover[];
+  forestK?: number;
+  combinedGridNoTrees?: ElevationGrid | null;
 };
 
 const FT_TO_METERS = 0.3048;
@@ -107,15 +114,17 @@ export function buildTrafficViewerSamples(
     if (!Number.isFinite(sample.lat) || !Number.isFinite(sample.lon)) {
       continue;
     }
-    const weight = Number.isFinite(sample.weight) ? (sample.weight as number) : 0;
+    const baseWeight = Number.isFinite(sample.weight) ? (sample.weight as number) : 0;
+    const dwellFactor = Number.isFinite(sample.dwellFactor) ? (sample.dwellFactor as number) : 1;
+    const weight = baseWeight * dwellFactor;
     if (weight <= 0) {
       continue;
     }
     const pixel = mapper.latLonToPixel(sample.lat, sample.lon);
     const elevationM = mapper.latLonToElevation(sample.lat, sample.lon);
-    const direction = Number.isFinite(sample.heading)
+    const direction = Number.isFinite(sample.headingDeg)
       ? {
-          angleRad: toRad((sample.heading as number) - 90),
+          angleRad: toRad((sample.headingDeg as number) - 90),
           coneRad
         }
       : undefined;
@@ -229,7 +238,7 @@ export function buildCombinedHeightGrid(
       if (!footprint || footprint.length < 3) {
         continue;
       }
-      const heightInfo = inferBuildingHeightInfo(building);
+      const heightInfo = resolveBuildingHeightInfo(building);
       const heightM = heightInfo.effectiveHeightMeters;
       if (!Number.isFinite(heightM) || heightM <= 0) {
         continue;
@@ -432,7 +441,9 @@ export function computeVisibilityHeatmap(
   candidates: CandidateSample[],
   combinedGrid: ElevationGrid,
   settings: AppSettings,
-  mapper: GeoMapper
+  mapper: GeoMapper,
+  options?: VisibilityOptions,
+  signal?: AbortSignal
 ): HeatmapCell[] {
   const cells: HeatmapCell[] = [];
   if (candidates.length === 0) {
@@ -449,8 +460,14 @@ export function computeVisibilityHeatmap(
 
   const viewerEyeHeightM = settings.viewerHeightFt * FT_TO_METERS;
   const targetHeightM = settings.siteHeightFt * FT_TO_METERS;
+  const denseCover = options?.denseCover ?? [];
+  const forestK = Number.isFinite(options?.forestK) ? (options?.forestK as number) : settings.forestK;
+  const combinedGridNoTrees = options?.combinedGridNoTrees ?? null;
 
   for (const candidate of candidates) {
+    if (signal?.aborted) {
+      return cells;
+    }
     if (totalWeight <= 0 || viewers.length === 0) {
       cells.push({ pixel: candidate.pixel, score: 0 });
       continue;
@@ -469,10 +486,15 @@ export function computeVisibilityHeatmap(
       if (distanceFactor <= 0) {
         continue;
       }
-      if (!isVisible(viewer, candidate, viewerEyeHeightM, targetHeightM, combinedGrid, mapper)) {
+      const denseImpact = denseCover.length
+        ? computeDenseCoverImpact(viewer, candidate, denseCover, forestK)
+        : { transmittance: 1, intersects: false };
+      const gridToUse =
+        denseImpact.intersects && combinedGridNoTrees ? combinedGridNoTrees : combinedGrid;
+      if (!isVisible(viewer, candidate, viewerEyeHeightM, targetHeightM, gridToUse, mapper)) {
         continue;
       }
-      scoreSum += baseWeight * viewConeFactor * distanceFactor;
+      scoreSum += baseWeight * viewConeFactor * distanceFactor * denseImpact.transmittance;
     }
     cells.push({
       pixel: candidate.pixel,
@@ -488,12 +510,20 @@ export function computeShadingOverlay(
   candidates: CandidateSample[],
   combinedGrid: ElevationGrid,
   settings: AppSettings,
-  mapper: GeoMapper
+  mapper: GeoMapper,
+  options?: VisibilityOptions
 ): HeatmapCell[] {
   if (candidates.length === 0) {
     return [];
   }
-  const coverageCells = computeVisibilityHeatmap(viewers, candidates, combinedGrid, settings, mapper);
+  const coverageCells = computeVisibilityHeatmap(
+    viewers,
+    candidates,
+    combinedGrid,
+    settings,
+    mapper,
+    options
+  );
   const blindCells: HeatmapCell[] = [];
   for (const cell of coverageCells) {
     const blindScore = 1 - cell.score;
@@ -618,6 +648,82 @@ function computeDistanceFactor(
   }
   const excess = distanceFt - maxDistanceFt;
   return clamp(1 - excess / maxDistanceFt, 0, 1);
+}
+
+function computeDenseCoverImpact(
+  viewer: ViewerSample,
+  candidate: CandidateSample,
+  denseCover: DenseCover[],
+  forestK: number
+): { transmittance: number; intersects: boolean } {
+  if (!denseCover.length || !Number.isFinite(forestK) || forestK <= 0) {
+    return { transmittance: 1, intersects: false };
+  }
+  const totalDistance = haversineMeters(viewer.lat, viewer.lon, candidate.lat, candidate.lon);
+  if (!Number.isFinite(totalDistance) || totalDistance <= 0) {
+    return { transmittance: 1, intersects: false };
+  }
+  const stepLength = 5;
+  const steps = Math.max(4, Math.ceil(totalDistance / stepLength));
+  let totalAttenuation = 0;
+  let insideDistance = 0;
+  let prevLat = viewer.lat;
+  let prevLon = viewer.lon;
+  for (let i = 1; i <= steps; i += 1) {
+    const t = i / steps;
+    const lat = viewer.lat + (candidate.lat - viewer.lat) * t;
+    const lon = viewer.lon + (candidate.lon - viewer.lon) * t;
+    const segmentLength = haversineMeters(prevLat, prevLon, lat, lon);
+    const density = resolveDenseCoverDensity(lat, lon, denseCover);
+    if (density > 0) {
+      insideDistance += segmentLength;
+      totalAttenuation += density * segmentLength;
+    }
+    prevLat = lat;
+    prevLon = lon;
+  }
+  if (totalAttenuation <= 0) {
+    return { transmittance: 1, intersects: false };
+  }
+  const transmittance = Math.exp(-forestK * totalAttenuation);
+  return {
+    transmittance: clamp(transmittance, 0, 1),
+    intersects: insideDistance > 0
+  };
+}
+
+function resolveDenseCoverDensity(
+  lat: number,
+  lon: number,
+  denseCover: DenseCover[]
+): number {
+  let maxDensity = 0;
+  for (const dense of denseCover) {
+    if (dense.polygonLatLon.length < 3) {
+      continue;
+    }
+    if (pointInPolygonGeo({ lat, lon }, dense.polygonLatLon)) {
+      maxDensity = Math.max(maxDensity, dense.density);
+    }
+  }
+  return maxDensity;
+}
+
+function pointInPolygonGeo(point: GeoPoint, polygon: GeoPoint[]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const xi = polygon[i].lon;
+    const yi = polygon[i].lat;
+    const xj = polygon[j].lon;
+    const yj = polygon[j].lat;
+    const intersect =
+      yi > point.lat !== yj > point.lat &&
+      point.lon < ((xj - xi) * (point.lat - yi)) / (yj - yi + Number.EPSILON) + xi;
+    if (intersect) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 function shapeToPolygonPixels(shape: Shape): GridPoint[] {

@@ -44,6 +44,8 @@ function makeSettings(): AppSettings {
     viewDistanceFt: 0,
     topoSpacingFt: 10,
     sampleStepPx: 10,
+    forestK: 0.04,
+    denseCoverDensity: 0.6,
     frame: {
       maxSideFt: 2640,
       minSideFt: 300

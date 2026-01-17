@@ -97,4 +97,64 @@ describe("buildGraph", () => {
     expect(weight2).toBeLessThan(weight1);
     expect(weight3).toBeLessThan(weight2);
   });
+
+  it("classifies turn movements at intersections", () => {
+    const roads: Road[] = [
+      {
+        id: "in",
+        class: "residential",
+        oneway: "yes",
+        points: [
+          { lat: -0.001, lon: 0, nodeId: "A" },
+          { lat: 0, lon: 0, nodeId: "B" }
+        ]
+      },
+      {
+        id: "straight",
+        class: "residential",
+        oneway: "yes",
+        points: [
+          { lat: 0, lon: 0, nodeId: "B" },
+          { lat: 0.001, lon: 0, nodeId: "C" }
+        ]
+      },
+      {
+        id: "right",
+        class: "residential",
+        oneway: "yes",
+        points: [
+          { lat: 0, lon: 0, nodeId: "B" },
+          { lat: 0, lon: 0.001, nodeId: "D" }
+        ]
+      },
+      {
+        id: "left",
+        class: "residential",
+        oneway: "yes",
+        points: [
+          { lat: 0, lon: 0, nodeId: "B" },
+          { lat: 0, lon: -0.001, nodeId: "E" }
+        ]
+      }
+    ];
+
+    const graph = buildGraph(roads, { coordPrecision: 6 });
+    const inEdge = graph.edges.find((edge) => edge.roadId === "in");
+    const straightEdge = graph.edges.find((edge) => edge.roadId === "straight");
+    const rightEdge = graph.edges.find((edge) => edge.roadId === "right");
+    const leftEdge = graph.edges.find((edge) => edge.roadId === "left");
+
+    expect(inEdge).toBeTruthy();
+    expect(straightEdge).toBeTruthy();
+    expect(rightEdge).toBeTruthy();
+    expect(leftEdge).toBeTruthy();
+
+    const straightMove = graph.movementByEdgePair.get(`${inEdge?.id}|${straightEdge?.id}`);
+    const rightMove = graph.movementByEdgePair.get(`${inEdge?.id}|${rightEdge?.id}`);
+    const leftMove = graph.movementByEdgePair.get(`${inEdge?.id}|${leftEdge?.id}`);
+
+    expect(straightMove?.turn).toBe("straight");
+    expect(rightMove?.turn).toBe("right");
+    expect(leftMove?.turn).toBe("left");
+  });
 });

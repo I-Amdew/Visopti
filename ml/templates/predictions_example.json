@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "imagery": {
+    "providerId": "esri_world_imagery",
+    "zoom": 19
+  },
+  "predictions": [
+    {
+      "id": "pred_0001",
+      "class": "tree_deciduous",
+      "centerLat": 37.7749,
+      "centerLon": -122.4194,
+      "crownRadiusMeters": 4.2,
+      "confidence": 0.92
+    },
+    {
+      "id": "pred_0002",
+      "class": "billboard",
+      "centerLat": 37.7753,
+      "centerLon": -122.4188,
+      "yawDeg": 45,
+      "confidence": 0.71,
+      "regionHintId": "region_01"
+    }
+  ]
+}

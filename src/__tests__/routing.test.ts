@@ -50,7 +50,14 @@ describe("routing", () => {
     ["C", [edges[2]]]
   ]);
 
-  const graph: Graph = { nodes, edges, adjacency, nodeList: Array.from(nodes.values()) };
+  const graph: Graph = {
+    nodes,
+    edges,
+    adjacency,
+    nodeList: Array.from(nodes.values()),
+    movementByNode: new Map(),
+    movementByEdgePair: new Map()
+  };
 
   it("returns the shortest path by total weight", () => {
     const path = shortestPath(graph, "A", "B");

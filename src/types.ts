@@ -82,14 +82,20 @@ export interface AppSettings {
   viewDistanceFt: number;
   topoSpacingFt: number;
   sampleStepPx: number;
+  forestK: number;
+  denseCoverDensity: number;
   frame: FrameSettings;
   overlays: OverlaySettings;
   opacity: OpacitySettings;
 }
 
-export interface StructureFootprint {
+export interface StructureFootprintV1 {
   widthFt: number;
   lengthFt: number;
+}
+
+export interface StructureFootprint {
+  points: { x: number; y: number }[];
 }
 
 export interface StructureCenter {
@@ -97,13 +103,46 @@ export interface StructureCenter {
   y: number;
 }
 
-export interface StructureParams {
+export interface StructureParamsV1 {
   heightFt: number;
-  footprint: StructureFootprint;
+  footprint: StructureFootprintV1;
   placeAtCenter: boolean;
   centerPx: StructureCenter;
   rotationDeg: number;
 }
+
+export type StructureMode = "parametric" | "imported";
+
+export interface ImportedModelRef {
+  assetId: string;
+  name: string;
+  format: "glb" | "gltf" | "obj" | "stl";
+  scale: number;
+  rotationDeg: number;
+  offset: { x: number; y: number; z: number };
+  footprintProxy?: { points: { x: number; y: number }[] };
+}
+
+export interface FacePriorityArc {
+  primaryEdgeIndex: number;
+  arcDeg: 180 | 270;
+}
+
+export interface StructureParamsV2 {
+  version: 2;
+  mode: StructureMode;
+  footprint: StructureFootprint;
+  heightMeters: number;
+  placeAtCenter: boolean;
+  centerPx: StructureCenter;
+  rotationDeg: number;
+  facePriority?: FacePriorityArc;
+  legacyWidthFt?: number;
+  legacyLengthFt?: number;
+  imported?: ImportedModelRef;
+}
+
+export type StructureParams = StructureParamsV2;
 
 export interface ViewerSample {
   pixel: { x: number; y: number };
@@ -204,6 +243,9 @@ export interface Road {
   lanesForward?: number;
   lanesBackward?: number;
   lanesInferred?: boolean;
+  turnLanes?: string;
+  turnLanesForward?: string;
+  turnLanesBackward?: string;
   name?: string;
   showDirectionLine?: boolean;
   directionLine?: MapPoint[];
@@ -215,9 +257,20 @@ export interface Building {
   id: string;
   footprint: MapPoint[];
   height?: number;
-  userHeightMeters?: number;
+  inferredHeightMeters?: number;
+  heightSource?: BuildingHeightSource;
+  confidence?: number;
+  userOverrideMeters?: number;
+  effectiveHeightMeters?: number;
   tags?: Record<string, string>;
 }
+
+export type BuildingHeightSource =
+  | "osm_height"
+  | "osm_levels"
+  | "default"
+  | "external_api"
+  | (string & {});
 
 export type TreeType = "pine" | "deciduous";
 export type TreeHeightSource = "derived" | "user_override" | "ml" | "osm";
@@ -229,6 +282,13 @@ export interface Tree {
   baseRadiusMeters: number;
   heightMeters: number;
   heightSource: TreeHeightSource;
+}
+
+export interface DenseCover {
+  id: string;
+  polygonLatLon: GeoPoint[];
+  density: number;
+  mode: "dense_cover";
 }
 
 export type SignKind = "billboard" | "sign";
@@ -284,6 +344,7 @@ export interface ProjectPayload {
   basemapId: TileSourceId;
   settings: AppSettings;
   shapes: Shape[];
+  denseCover?: DenseCover[];
   structure?: StructureParams;
   autoRoads?: Road[];
   autoBuildings?: Building[];
@@ -302,6 +363,7 @@ export interface ProjectState {
   basemapId: TileSourceId;
   settings: AppSettings;
   shapes: Shape[];
+  denseCover: DenseCover[];
   structure: StructureParams;
   autoRoads: Road[];
   autoBuildings: Building[];

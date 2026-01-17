@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Visopti Trainer</title>
+    <link rel="icon" href="data:,">
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  </head>
+  <body>
+    <div id="trainerDisabled" class="trainer-disabled hidden">Not enabled.</div>
+    <div id="app" class="trainer-app">
+      <div id="workspace">
+        <div id="trainerMap" class="stage-layer"></div>
+        <canvas id="trainerCanvas" class="stage-layer" width="800" height="600"></canvas>
+      </div>
+
+      <section id="controls">
+        <h2>ML Trainer</h2>
+        <div class="panel trainer-panel">
+          <h3>Target Region</h3>
+          <div class="trainer-toolbar">
+            <button class="trainer-button" data-tool="new_region" id="toolNewRegion">
+              New Region
+            </button>
+          </div>
+          <div class="toggle-group">
+            <label class="toggle-option">
+              <input type="radio" name="trainerRegionMode" value="sparse" checked />
+              Sparse
+            </label>
+            <label class="toggle-option">
+              <input type="radio" name="trainerRegionMode" value="exhaustive" />
+              Exhaustive
+            </label>
+          </div>
+          <div id="trainerRegionList" class="trainer-region-list"></div>
+        </div>
+        <div class="panel trainer-panel">
+          <h3>Labeling</h3>
+          <div class="trainer-toolbar">
+            <button class="trainer-button is-active" data-tool="select" id="toolSelect">
+              Select (Esc)
+            </button>
+            <button class="trainer-button" data-tool="tree_deciduous" id="toolDeciduous">
+              Add Deciduous (1)
+            </button>
+            <button class="trainer-button" data-tool="tree_pine" id="toolPine">
+              Add Pine (2)
+            </button>
+            <button class="trainer-button" data-tool="dense_cover" id="toolDenseCover">
+              Dense Cover (D)
+            </button>
+            <button class="trainer-button" data-tool="sign_billboard" id="toolBillboard">
+              Add Billboard (B)
+            </button>
+            <button class="trainer-button" data-tool="sign_stop" id="toolStopSign">
+              Add Stop Sign (S)
+            </button>
+          </div>
+          <label class="toggle-option">
+            <input type="checkbox" id="denseCoverEdgeOnly" />
+            Edge trees only
+          </label>
+          <div id="trainerStatus" class="status-line">Select a tool to begin.</div>
+        </div>
+        <div class="panel trainer-panel">
+          <h3>Training Zones</h3>
+          <div class="trainer-field">
+            <label>
+              Patch size (px)
+              <select id="trainingPatchSize">
+                <option value="256">256</option>
+                <option value="512">512</option>
+                <option value="768">768</option>
+              </select>
+            </label>
+          </div>
+          <div class="trainer-field">
+            <label>
+              Tree zoom
+              <input type="range" min="16" max="22" step="1" id="trainingTreeZoom" />
+              <span id="trainingTreeZoomValue">20</span>
+            </label>
+          </div>
+          <div class="trainer-field">
+            <label>
+              Dense cover zoom
+              <input type="range" min="16" max="22" step="1" id="trainingDenseZoom" />
+              <span id="trainingDenseZoomValue">18</span>
+            </label>
+          </div>
+          <div class="trainer-inline">
+            <label>
+              Edge band width (m)
+              <input type="number" min="1" step="1" id="trainingEdgeBand" />
+            </label>
+            <label>
+              Interior spacing (m)
+              <input type="number" min="1" step="1" id="trainingInteriorSpacing" />
+            </label>
+          </div>
+          <div class="trainer-field">
+            <label>
+              Edge spacing (m)
+              <input type="number" min="1" step="1" id="trainingEdgeSpacing" />
+            </label>
+          </div>
+        </div>
+        <div class="panel trainer-panel">
+          <h3>Progress</h3>
+          <div class="value-row">
+            <span>Pine</span>
+            <span id="trainerPineCount">0</span>
+          </div>
+          <div class="value-row">
+            <span>Deciduous</span>
+            <span id="trainerDeciduousCount">0</span>
+          </div>
+          <div class="value-row">
+            <span>Total trees</span>
+            <span id="trainerTreeTotalCount">0</span>
+          </div>
+          <div class="value-row">
+            <span>Dense cover polygons</span>
+            <span id="trainerDenseCoverCount">0</span>
+          </div>
+          <div class="value-row">
+            <span>Signs</span>
+            <span id="trainerSignCount">0</span>
+          </div>
+        </div>
+        <div class="panel trainer-panel">
+          <h3>Dataset</h3>
+          <div class="value-row">
+            <span>Total trees labeled</span>
+            <span id="trainerDatasetTreeTotal">0</span>
+          </div>
+          <div class="value-row">
+            <span>Goal</span>
+            <span id="trainerDatasetGoal">0 / 300</span>
+          </div>
+          <div class="trainer-toolbar">
+            <button class="trainer-button" id="trainerComputeAnalytics">
+              Compute dataset analytics
+            </button>
+            <button class="trainer-button" id="trainerExportBundle">
+              Export training bundle
+            </button>
+            <button class="trainer-button" id="trainerExportAcceptedTrees">
+              Export accepted trees
+            </button>
+          </div>
+          <label class="import-label">
+            Import dataset.json
+            <input type="file" id="trainerImportDataset" accept="application/json" />
+          </label>
+          <label class="toggle-option">
+            <input type="checkbox" id="trainerSyncToggle" />
+            Sync dataset to repo (dev)
+          </label>
+          <div id="trainerSyncStatus" class="status-line hidden"></div>
+          <div id="trainerDatasetStatus" class="status-line hidden"></div>
+          <div id="trainerExportProgress" class="progress-row hidden">
+            <div class="progress-header">
+              <span id="trainerExportLabel"></span>
+              <span id="trainerExportCount"></span>
+            </div>
+            <progress id="trainerExportBar" value="0" max="1"></progress>
+          </div>
+          <div id="trainerAnalytics" class="trainer-analytics hidden">
+            <div class="trainer-analytics-summary">
+              <div class="value-row">
+                <span>Pine samples</span>
+                <span id="trainerAnalyticsPine">0</span>
+              </div>
+              <div class="value-row">
+                <span>Deciduous samples</span>
+                <span id="trainerAnalyticsDeciduous">0</span>
+              </div>
+              <div class="value-row">
+                <span>Billboard samples</span>
+                <span id="trainerAnalyticsBillboard">0</span>
+              </div>
+              <div class="value-row">
+                <span>Stop sign samples</span>
+                <span id="trainerAnalyticsStop">0</span>
+              </div>
+              <div class="value-row">
+                <span>Negative samples</span>
+                <span id="trainerAnalyticsNegatives">0</span>
+              </div>
+              <div class="value-row">
+                <span>Dense cover samples</span>
+                <span id="trainerAnalyticsDenseSamples">0</span>
+              </div>
+              <div class="value-row">
+                <span>Avg radius (m)</span>
+                <span id="trainerAnalyticsAvgRadius">0</span>
+              </div>
+              <div class="value-row">
+                <span>Avg height (m)</span>
+                <span id="trainerAnalyticsAvgHeight">0</span>
+              </div>
+              <div class="value-row">
+                <span>Dense cover area</span>
+                <span id="trainerAnalyticsDenseArea">0 sq m / 0 sq ft</span>
+              </div>
+            </div>
+            <div class="trainer-analytics-grid">
+              <div class="trainer-chart-card">
+                <div class="trainer-chart-title">Crown radius (m)</div>
+                <canvas id="trainerChartRadius" class="trainer-chart"></canvas>
+              </div>
+              <div class="trainer-chart-card">
+                <div class="trainer-chart-title">Derived height (m)</div>
+                <canvas id="trainerChartHeight" class="trainer-chart"></canvas>
+              </div>
+              <div class="trainer-chart-card">
+                <div class="trainer-chart-title">Radius vs height</div>
+                <canvas id="trainerChartScatter" class="trainer-chart"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="panel trainer-panel">
+          <h3>ML Predictions</h3>
+          <div class="value-row">
+            <span>Model version</span>
+            <span id="trainerMlVersion">--</span>
+          </div>
+          <div class="trainer-toolbar">
+            <button class="trainer-button" id="trainerMlReload">Reload model</button>
+            <button class="trainer-button" id="trainerMlPropose">Propose detections in view</button>
+          </div>
+          <div id="trainerMlStatus" class="status-line hidden"></div>
+        </div>
+        <div class="panel trainer-panel">
+          <h3>Review</h3>
+          <label class="import-label">
+            Import predictions JSON
+            <input type="file" id="trainerImportPredictions" accept="application/json" />
+          </label>
+          <div class="value-row">
+            <span>Queue size</span>
+            <span id="trainerReviewQueueCount">0</span>
+          </div>
+          <div class="trainer-toolbar">
+            <button class="trainer-button" id="trainerStartReview">Start review</button>
+            <button class="trainer-button" id="trainerClearReview">Clear queue</button>
+          </div>
+          <div class="trainer-toolbar">
+            <button class="trainer-button" id="trainerStartDenseReview">
+              Start dense cover review
+            </button>
+          </div>
+          <div id="trainerReviewStatus" class="status-line hidden"></div>
+        </div>
+        <div class="panel trainer-panel">
+          <h3>Inspect/Edit</h3>
+          <div id="trainerInspectorEmpty" class="status-line">Select a label to inspect.</div>
+          <div id="trainerInspectorBody" class="trainer-inspector hidden"></div>
+        </div>
+        <div id="trainerReviewMode" class="trainer-review-mode hidden">
+          <div class="trainer-review-header">
+            <h3>Review mode</h3>
+            <button class="trainer-button" id="trainerExitReview">Exit (Esc)</button>
+          </div>
+          <div class="trainer-review-meta">
+            <div class="value-row">
+              <span id="trainerReviewIndex">0 / 0</span>
+              <span id="trainerReviewConfidence">Confidence: --</span>
+            </div>
+            <div class="value-row">
+              <span id="trainerReviewClass">Class: --</span>
+              <span id="trainerReviewModeLabel">Mode: Predictions</span>
+            </div>
+          </div>
+          <div class="trainer-review-canvas-wrap">
+            <canvas id="trainerReviewCanvas" width="512" height="512"></canvas>
+          </div>
+          <label class="trainer-field" id="trainerReviewClassWrap">
+            Force tree type
+            <select id="trainerReviewClassSelect">
+              <option value="">Use prediction</option>
+              <option value="tree_deciduous">Deciduous</option>
+              <option value="tree_pine">Pine</option>
+            </select>
+          </label>
+          <div class="trainer-review-radius hidden" id="trainerReviewRadiusWrap">
+            <div class="trainer-review-radius-row">
+              <button class="trainer-button" id="trainerReviewRadiusDown" type="button">-</button>
+              <input id="trainerReviewRadiusInput" type="number" min="0" step="0.1" />
+              <button class="trainer-button" id="trainerReviewRadiusUp" type="button">+</button>
+            </div>
+            <div class="trainer-review-radius-meta" id="trainerReviewRadiusMeta">
+              Derived height: --
+            </div>
+          </div>
+          <div class="trainer-review-actions">
+            <div class="trainer-review-actions-group trainer-review-actions-bad">
+              <button class="trainer-button trainer-button--bad" id="trainerReviewReject">
+                Bad (1)
+              </button>
+            </div>
+            <div class="trainer-review-actions-group trainer-review-actions-change">
+              <button class="trainer-button trainer-button--change" id="trainerReviewSwitch">
+                Wrong type (3)
+              </button>
+            </div>
+            <div class="trainer-review-actions-group trainer-review-actions-good">
+              <button class="trainer-button trainer-button--good" id="trainerReviewAccept">
+                Good (0)
+              </button>
+            </div>
+          </div>
+          <div id="trainerReviewHint" class="status-line hidden"></div>
+        </div>
+      </section>
+    </div>
+    <script type="module" src="/src/trainer/main.ts"></script>
+  </body>
+</html>

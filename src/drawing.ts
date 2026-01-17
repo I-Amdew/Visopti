@@ -21,7 +21,7 @@ import {
   MapPoint
 } from "./roads/types";
 import type { WorldFeatureKind, WorldModel } from "./world/worldModel";
-import { inferBuildingHeightInfo } from "./world/height";
+import { resolveBuildingHeightInfo } from "./world/height";
 import { demandWeightForClass, resolveLaneCounts } from "./traffic/lanes";
 import type { LaneCounts } from "./traffic/lanes";
 import {
@@ -71,6 +71,8 @@ const VIEW_SPIN_SPEED = 0.6;
 const DEFAULT_BUILDING_HEIGHT_M = 3;
 const TREE_FILL = "#4ade80";
 const TREE_STROKE = "#1f7f6c";
+const DENSE_COVER_FILL = "#2c8f4d";
+const DENSE_COVER_STROKE = "#1d5f34";
 const SIGN_FILL = "#f59e0b";
 const SIGN_STROKE = "#b45309";
 const SIGNAL_FILL = "#ef4444";
@@ -102,6 +104,7 @@ export type ToolMode =
   | "erase"
   | "drawObstacleEllipse"
   | "drawObstaclePolygon"
+  | "drawDenseCoverPolygon"
   | "drawCandidatePolygon"
   | "drawViewerPolygon"
   | "placeTreePine"
@@ -154,6 +157,8 @@ interface DrawingManagerOptions {
     id: string;
     location: GeoPoint;
   }) => void;
+  onDenseCoverCreated?: (request: { polygon: GeoPoint[]; density: number }) => void;
+  onDenseCoverDeleted?: (id: string) => void;
 }
 
 interface DrawingManagerState {
@@ -215,6 +220,7 @@ interface DrawingManagerState {
   shadingOpacity: number;
   showContours: boolean;
   contourOpacity: number;
+  denseCoverDensity: number;
 }
 
 interface EllipseDragState {
@@ -233,8 +239,11 @@ interface TreeLabelDragState {
 
 type DragState = EllipseDragState | TreeLabelDragState;
 
+type PolygonDraftMode = "shape" | "dense_cover";
+
 interface PolygonDraft {
-  zone: ZoneType;
+  mode: PolygonDraftMode;
+  zone?: ZoneType;
   points: { x: number; y: number }[];
 }
 
@@ -373,6 +382,7 @@ export interface DrawingManager {
   setContours(segments: ContourSegment[] | null): void;
   setShowContours(value: boolean): void;
   setContourOpacity(value: number): void;
+  setDenseCoverDensity(value: number): void;
   setRoadData(data: { autoRoads: Road[]; customRoads: Road[] }): void;
   setBuildings(buildings: Building[]): void;
   setWorldModel(model: WorldModel | null): void;
@@ -421,7 +431,9 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     onRoadEditSelectionChanged,
     onFeatureSelectionChanged,
     onFeaturePlaced,
-    onFeatureMoved
+    onFeatureMoved,
+    onDenseCoverCreated,
+    onDenseCoverDeleted
   } = options;
   const context = canvas.getContext("2d");
   if (!context) {
@@ -537,7 +549,8 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     heatmapOpacity: 0.45,
     shadingOpacity: 0.6,
     showContours: false,
-    contourOpacity: 0.9
+    contourOpacity: 0.9,
+    denseCoverDensity: 0.7
   };
   let lastSelectedShapeId: string | null = null;
   let lastSelectedFeature: FeatureSelection | null = null;
@@ -698,6 +711,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       drawRoads(ctx, state, mapStyle, lockedStyle, appliedScale, baseLaneWidthPx);
     }
     if (state.layerVisibility.trees) {
+      drawDenseCover(ctx, state);
       drawTrees(ctx, state, lockedStyle, metersPerPixel);
     }
     if (state.layerVisibility.signs) {
@@ -927,7 +941,11 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
         redraw();
         return;
       }
-      case "erase":
+    case "erase":
+        if (eraseDenseCoverAt(pos)) {
+          redraw();
+          return;
+        }
         if (eraseShapeAt(pos)) {
           notifyShapes();
           redraw();
@@ -942,16 +960,16 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       return;
     }
     if (drawInfo.kind === "polygon") {
-      if (maybeClosePolygon(pos, drawInfo.zone)) {
+      if (maybeClosePolygon(pos, drawInfo)) {
         redraw();
         return;
       }
-      extendPolygon(pos, drawInfo.zone);
+      extendPolygon(pos, drawInfo);
       redraw();
       return;
     }
 
-    if (drawInfo.kind === "ellipse") {
+    if (drawInfo.kind === "ellipse" && drawInfo.zone) {
       state.dragState = {
         start: pos,
         current: pos,
@@ -1854,7 +1872,7 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
   }
 
   function resolveBuildingHeightM(building: Building): number {
-    return inferBuildingHeightInfo(building).effectiveHeightMeters;
+    return resolveBuildingHeightInfo(building).effectiveHeightMeters;
   }
 
   function rebuildBuildingCaches() {
@@ -1976,19 +1994,59 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
     return true;
   }
 
-  function extendPolygon(point: { x: number; y: number }, zone: ZoneType) {
-    if (!state.polygonDraft || state.polygonDraft.zone !== zone) {
+  function eraseDenseCoverAt(pos: { x: number; y: number }): boolean {
+    const denseCover = state.worldModel?.denseCover ?? [];
+    if (denseCover.length === 0) {
+      return false;
+    }
+    const projector = state.geoProjector ?? state.geoMapper;
+    for (let i = denseCover.length - 1; i >= 0; i -= 1) {
+      const feature = denseCover[i];
+      const points =
+        feature.render?.map((point) => ({ x: point.x, y: point.y })) ??
+        (projector
+          ? feature.polygon.map((point) => projector.latLonToPixel(point.lat, point.lon))
+          : null);
+      if (!points || points.length < 3) {
+        continue;
+      }
+      if (pointInPolygon(pos, points)) {
+        onDenseCoverDeleted?.(feature.id);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function extendPolygon(
+    point: { x: number; y: number },
+    info: { mode: PolygonDraftMode; zone?: ZoneType }
+  ) {
+    if (
+      !state.polygonDraft ||
+      state.polygonDraft.mode !== info.mode ||
+      state.polygonDraft.zone !== info.zone
+    ) {
       state.polygonDraft = {
-        zone,
+        mode: info.mode,
+        zone: info.zone,
         points: []
       };
     }
     state.polygonDraft.points.push(point);
   }
 
-  function maybeClosePolygon(point: { x: number; y: number }, zone: ZoneType): boolean {
+  function maybeClosePolygon(
+    point: { x: number; y: number },
+    info: { mode: PolygonDraftMode; zone?: ZoneType }
+  ): boolean {
     const poly = state.polygonDraft;
-    if (!poly || poly.zone !== zone || poly.points.length < 3) {
+    if (
+      !poly ||
+      poly.mode !== info.mode ||
+      poly.zone !== info.zone ||
+      poly.points.length < 3
+    ) {
       return false;
     }
     const first = poly.points[0];
@@ -2002,6 +2060,21 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
   function finalizePolygon() {
     const poly = state.polygonDraft;
     if (!poly || poly.points.length < 3) {
+      state.polygonDraft = null;
+      redraw();
+      return;
+    }
+    if (poly.mode === "dense_cover") {
+      const projector = state.geoProjector ?? state.geoMapper;
+      if (projector) {
+        const polygon = poly.points.map((point) => projector.pixelToLatLon(point.x, point.y));
+        onDenseCoverCreated?.({ polygon, density: state.denseCoverDensity });
+      }
+      state.polygonDraft = null;
+      redraw();
+      return;
+    }
+    if (!poly.zone) {
       state.polygonDraft = null;
       redraw();
       return;
@@ -2403,6 +2476,9 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
       state.contourOpacity = value;
       redraw();
     },
+    setDenseCoverDensity(value: number) {
+      state.denseCoverDensity = clampValue(value, 0, 1);
+    },
     setRoadData(data: { autoRoads: Road[]; customRoads: Road[] }) {
       state.autoRoads = data.autoRoads.map((road) => cloneRoad(road));
       state.customRoads = data.customRoads.map((road) => cloneRoad(road));
@@ -2425,6 +2501,8 @@ export function createDrawingManager(options: DrawingManagerOptions): DrawingMan
           heightM: model.structure.heightMeters,
           points: model.structure.render.map((point) => ({ x: point.x, y: point.y }))
         };
+      } else {
+        state.structureRender = null;
       }
       rebuildRoadCaches();
       rebuildBuildingCaches();
@@ -3245,6 +3323,72 @@ function drawSelectedBuildingOutline(
   ctx.restore();
 }
 
+function drawDenseCover(ctx: CanvasRenderingContext2D, state: DrawingManagerState) {
+  const model = state.worldModel;
+  if (!model || model.denseCover.length === 0) {
+    return;
+  }
+  const projector = state.geoProjector ?? state.geoMapper;
+  for (const dense of model.denseCover) {
+    const points =
+      dense.render?.map((point) => ({ x: point.x, y: point.y })) ??
+      (projector
+        ? dense.polygon.map((point) => projector.latLonToPixel(point.lat, point.lon))
+        : null);
+    if (!points || points.length < 3) {
+      continue;
+    }
+    const bounds = computeBounds(points);
+    if (!bounds) {
+      continue;
+    }
+    const fillAlpha = clampValue(0.12 + dense.density * 0.25, 0.12, 0.45);
+    const hatchAlpha = clampValue(0.2 + dense.density * 0.35, 0.2, 0.6);
+    const spacing = 10;
+
+    ctx.save();
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      if (index === 0) {
+        ctx.moveTo(point.x, point.y);
+      } else {
+        ctx.lineTo(point.x, point.y);
+      }
+    });
+    ctx.closePath();
+    ctx.fillStyle = applyAlpha(DENSE_COVER_FILL, fillAlpha);
+    ctx.fill();
+    ctx.clip();
+
+    ctx.strokeStyle = applyAlpha(DENSE_COVER_STROKE, hatchAlpha);
+    ctx.lineWidth = 1;
+    const minX = Math.floor(bounds.minX) - bounds.maxY;
+    const maxX = Math.ceil(bounds.maxX) + bounds.maxY;
+    for (let x = minX; x <= maxX; x += spacing) {
+      ctx.beginPath();
+      ctx.moveTo(x, bounds.minY);
+      ctx.lineTo(x + (bounds.maxY - bounds.minY), bounds.maxY);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      if (index === 0) {
+        ctx.moveTo(point.x, point.y);
+      } else {
+        ctx.lineTo(point.x, point.y);
+      }
+    });
+    ctx.closePath();
+    ctx.strokeStyle = applyAlpha(DENSE_COVER_STROKE, 0.7);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function drawTrees(
   ctx: CanvasRenderingContext2D,
   state: DrawingManagerState,
@@ -3807,10 +3951,38 @@ function drawPreviews(
 
   const poly = state.polygonDraft;
   if (poly) {
-    if (state.visibilityFilter[poly.zone]) {
+    if (poly.mode === "shape" && poly.zone) {
+      if (state.visibilityFilter[poly.zone]) {
+        ctx.save();
+        ctx.strokeStyle = outlineColor(poly.zone, lockedStyle);
+        ctx.fillStyle = zoneFill(poly.zone, 0.2, lockedStyle);
+        ctx.setLineDash([6, 6]);
+        ctx.beginPath();
+        poly.points.forEach((p, index) => {
+          if (index === 0) {
+            ctx.moveTo(p.x, p.y);
+          } else {
+            ctx.lineTo(p.x, p.y);
+          }
+        });
+        if (state.pointer) {
+          if (poly.points.length > 0) {
+            ctx.lineTo(state.pointer.x, state.pointer.y);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+        if (poly.points.length >= 3) {
+          const first = poly.points[0];
+          const highlight =
+            !!state.pointer && isPointNear(first, state.pointer, POLYGON_CLOSE_RADIUS);
+          drawPolygonCloseHandle(ctx, first, poly.zone, highlight, lockedStyle);
+        }
+      }
+    } else if (poly.mode === "dense_cover") {
       ctx.save();
-      ctx.strokeStyle = outlineColor(poly.zone, lockedStyle);
-      ctx.fillStyle = zoneFill(poly.zone, 0.2, lockedStyle);
+      ctx.strokeStyle = DENSE_COVER_STROKE;
+      ctx.fillStyle = applyAlpha(DENSE_COVER_FILL, 0.25);
       ctx.setLineDash([6, 6]);
       ctx.beginPath();
       poly.points.forEach((p, index) => {
@@ -3820,10 +3992,8 @@ function drawPreviews(
           ctx.lineTo(p.x, p.y);
         }
       });
-      if (state.pointer) {
-        if (poly.points.length > 0) {
-          ctx.lineTo(state.pointer.x, state.pointer.y);
-        }
+      if (state.pointer && poly.points.length > 0) {
+        ctx.lineTo(state.pointer.x, state.pointer.y);
       }
       ctx.stroke();
       ctx.restore();
@@ -3831,7 +4001,7 @@ function drawPreviews(
         const first = poly.points[0];
         const highlight =
           !!state.pointer && isPointNear(first, state.pointer, POLYGON_CLOSE_RADIUS);
-        drawPolygonCloseHandle(ctx, first, poly.zone, highlight, lockedStyle);
+        drawDenseCoverCloseHandle(ctx, first, highlight);
       }
     }
   }
@@ -4244,6 +4414,22 @@ function drawPolygonCloseHandle(
   ctx.restore();
 }
 
+function drawDenseCoverCloseHandle(
+  ctx: CanvasRenderingContext2D,
+  point: { x: number; y: number },
+  highlight: boolean
+) {
+  ctx.save();
+  ctx.lineWidth = highlight ? 3 : 1.5;
+  ctx.strokeStyle = highlight ? "#ffffff" : DENSE_COVER_STROKE;
+  ctx.fillStyle = highlight ? "rgba(255,255,255,0.9)" : applyAlpha(DENSE_COVER_FILL, 0.5);
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, POLYGON_CLOSE_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawPolygonVertexHandle(
   ctx: CanvasRenderingContext2D,
   point: { x: number; y: number },
@@ -4343,16 +4529,20 @@ function canvasToWorld(
   };
 }
 
-function toolToDrawInfo(tool: ToolMode): { zone: ZoneType; kind: "ellipse" | "polygon" } | null {
+function toolToDrawInfo(
+  tool: ToolMode
+): { zone?: ZoneType; kind: "ellipse" | "polygon"; mode: PolygonDraftMode } | null {
   switch (tool) {
     case "drawViewerPolygon":
-      return { zone: "viewer", kind: "polygon" };
+      return { zone: "viewer", kind: "polygon", mode: "shape" };
     case "drawCandidatePolygon":
-      return { zone: "candidate", kind: "polygon" };
+      return { zone: "candidate", kind: "polygon", mode: "shape" };
     case "drawObstaclePolygon":
-      return { zone: "obstacle", kind: "polygon" };
+      return { zone: "obstacle", kind: "polygon", mode: "shape" };
+    case "drawDenseCoverPolygon":
+      return { kind: "polygon", mode: "dense_cover" };
     case "drawObstacleEllipse":
-      return { zone: "obstacle", kind: "ellipse" };
+      return { zone: "obstacle", kind: "ellipse", mode: "shape" };
     case "placeTreePine":
     case "placeTreeDeciduous":
     case "placeSign":

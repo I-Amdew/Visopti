@@ -349,7 +349,9 @@ function readLabelObject(
       value.crownRadiusMeters,
       DEFAULT_TREE_RADIUS_METERS
     );
-    if (!Number.isFinite(value.crownRadiusMeters) || value.crownRadiusMeters <= 0) {
+    const rawRadius = value.crownRadiusMeters;
+    const radiusValue = typeof rawRadius === "number" ? rawRadius : Number.NaN;
+    if (!Number.isFinite(radiusValue) || radiusValue <= 0) {
       warnings.push(`Tree ${index + 1} radius defaulted.`);
     }
     const heightMeters = normalizePositiveNumber(value.heightMeters, NaN);

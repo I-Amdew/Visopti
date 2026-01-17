@@ -1,5 +1,6 @@
 import type {
   Building,
+  DenseCover,
   GeoBounds,
   GeoPoint,
   GeoProjector,
@@ -10,6 +11,8 @@ import type {
   SignHeightSource,
   SignKind,
   StructureParams,
+  StructureMode,
+  ImportedModelRef,
   TrafficSignal,
   Tree,
   TreeHeightSource,
@@ -17,7 +20,7 @@ import type {
 } from "../types";
 import type { RoadClass, RoadOneway, RoadSource } from "../types";
 import { buildCandidateRegionsFromShapes } from "./candidates";
-import { inferBuildingHeightInfo, type BuildingHeightInfo } from "./height";
+import { resolveBuildingHeightInfo, type BuildingHeightInfo } from "./height";
 import {
   DEFAULT_SIGN_DIMENSIONS,
   DEFAULT_SIGN_HEIGHT_SOURCE,
@@ -28,6 +31,7 @@ import {
   DEFAULT_TREE_TYPE,
   deriveTreeHeightMeters
 } from "../obstacles";
+import { resolveStructureFootprintPoints, resolveStructureRotationDeg } from "../structureFootprint";
 
 export type WorldFeatureKind =
   | "road"
@@ -36,7 +40,8 @@ export type WorldFeatureKind =
   | "sign"
   | "traffic_signal"
   | "candidate"
-  | "structure";
+  | "structure"
+  | "dense_cover";
 
 export interface LockedFrame {
   bounds: GeoBounds;
@@ -56,6 +61,7 @@ export interface WorldModel {
   signs: SignFeature[];
   trafficSignals: TrafficSignalFeature[];
   candidates: CandidateRegion[];
+  denseCover: DenseCoverFeature[];
   structure: StructureModel | null;
   meta: {
     createdAt: string;
@@ -74,6 +80,9 @@ export interface RoadFeature {
   lanesForward?: number;
   lanesBackward?: number;
   lanesInferred?: boolean;
+  turnLanes?: string;
+  turnLanesForward?: string;
+  turnLanesBackward?: string;
   geometry: { points: GeoPoint[] };
   render?: RenderPoint[];
 }
@@ -131,12 +140,24 @@ export interface CandidateRegion {
   sourceShapeId?: string;
 }
 
+export interface DenseCoverFeature {
+  kind: "dense_cover";
+  id: string;
+  polygon: GeoPoint[];
+  density: number;
+  mode: "dense_cover";
+  render?: RenderPoint[];
+}
+
 export interface StructureModel {
   kind: "structure";
   id: string;
+  mode: StructureMode;
   footprint: GeoPoint[];
   heightMeters: number;
   render?: RenderPoint[];
+  center?: GeoPoint;
+  imported?: ImportedModelRef;
 }
 
 export interface BuildWorldModelInput {
@@ -151,6 +172,7 @@ export interface BuildWorldModelInput {
     trees?: Tree[];
     signs?: Sign[];
     trafficSignals?: TrafficSignal[];
+    denseCover?: DenseCover[];
   };
   frame?: LockedFrame | null;
   geoProjector?: GeoProjector | null;
@@ -158,9 +180,7 @@ export interface BuildWorldModelInput {
   now?: Date;
 }
 
-const WORLD_MODEL_VERSION = 2;
-const FEET_TO_METERS = 0.3048;
-
+const WORLD_MODEL_VERSION = 3;
 export function buildWorldModelFromProject(input: BuildWorldModelInput): WorldModel {
   const projector = input.geoProjector ?? null;
   const frame = input.frame ?? resolveFrameFromProjector(projector);
@@ -174,6 +194,7 @@ export function buildWorldModelFromProject(input: BuildWorldModelInput): WorldMo
   const trees = project.trees ?? [];
   const signs = project.signs ?? [];
   const trafficSignals = project.trafficSignals ?? [];
+  const denseCover = project.denseCover ?? [];
   const roads = roadMode === "custom" ? customRoads : autoRoads;
 
   const roadFeatures = roads
@@ -187,6 +208,9 @@ export function buildWorldModelFromProject(input: BuildWorldModelInput): WorldMo
   const candidates = buildCandidateRegionsFromShapes(shapes, projector);
 
   const structure = buildStructureModel(project.structure, frame, projector);
+  const denseCoverFeatures = denseCover
+    .map((dense) => buildDenseCoverFeature(dense, projector))
+    .filter((dense): dense is DenseCoverFeature => !!dense);
 
   return {
     frame,
@@ -202,6 +226,7 @@ export function buildWorldModelFromProject(input: BuildWorldModelInput): WorldMo
       .map((signal) => buildTrafficSignalFeature(signal, projector))
       .filter((signal): signal is TrafficSignalFeature => !!signal),
     candidates,
+    denseCover: denseCoverFeatures,
     structure,
     meta: {
       createdAt: now.toISOString(),
@@ -227,6 +252,9 @@ function buildRoadFeature(road: Road, projector: GeoProjector | null): RoadFeatu
     lanesForward: road.lanesForward,
     lanesBackward: road.lanesBackward,
     lanesInferred: road.lanesInferred,
+    turnLanes: road.turnLanes,
+    turnLanesForward: road.turnLanesForward,
+    turnLanesBackward: road.turnLanesBackward,
     geometry: { points },
     render
   };
@@ -243,7 +271,7 @@ function buildBuildingFeature(
   const render = projector
     ? footprint.map((point) => projector.latLonToPixel(point.lat, point.lon))
     : undefined;
-  const height = inferBuildingHeightInfo(building);
+  const height = resolveBuildingHeightInfo(building);
   const name = building.tags?.name;
   return {
     kind: "building",
@@ -252,6 +280,31 @@ function buildBuildingFeature(
     footprint,
     height,
     tags: building.tags,
+    render
+  };
+}
+
+function buildDenseCoverFeature(
+  dense: DenseCover,
+  projector: GeoProjector | null
+): DenseCoverFeature | null {
+  if (!dense.polygonLatLon || dense.polygonLatLon.length < 3) {
+    return null;
+  }
+  const polygon = dense.polygonLatLon.map((point) => ({
+    lat: point.lat,
+    lon: point.lon
+  }));
+  const render = projector
+    ? polygon.map((point) => projector.latLonToPixel(point.lat, point.lon))
+    : undefined;
+  const density = Math.min(1, Math.max(0, dense.density));
+  return {
+    kind: "dense_cover",
+    id: dense.id,
+    polygon,
+    density,
+    mode: "dense_cover",
     render
   };
 }
@@ -354,40 +407,37 @@ function buildStructureModel(
   if (!metersPerPixel) {
     return null;
   }
-  const widthM = Math.max(1, structure.footprint.widthFt) * FEET_TO_METERS;
-  const lengthM = Math.max(1, structure.footprint.lengthFt) * FEET_TO_METERS;
-  const heightMeters = Math.max(1, structure.heightFt) * FEET_TO_METERS;
-  const halfWidth = (widthM / metersPerPixel.x) / 2;
-  const halfLength = (lengthM / metersPerPixel.y) / 2;
-  const angle = (structure.rotationDeg * Math.PI) / 180;
+  const footprint = resolveStructureFootprintPoints(structure);
+  const heightMeters = Math.max(1, structure.heightMeters);
+  const pixelsPerMeterX = 1 / metersPerPixel.x;
+  const pixelsPerMeterY = 1 / metersPerPixel.y;
+  const angle = (resolveStructureRotationDeg(structure) * Math.PI) / 180;
   const axisX = { x: Math.cos(angle), y: Math.sin(angle) };
   const axisY = { x: -Math.sin(angle), y: Math.cos(angle) };
   const center = structure.centerPx;
-  const render: RenderPoint[] = [
-    {
-      x: center.x + axisX.x * -halfWidth + axisY.x * -halfLength,
-      y: center.y + axisX.y * -halfWidth + axisY.y * -halfLength
-    },
-    {
-      x: center.x + axisX.x * halfWidth + axisY.x * -halfLength,
-      y: center.y + axisX.y * halfWidth + axisY.y * -halfLength
-    },
-    {
-      x: center.x + axisX.x * halfWidth + axisY.x * halfLength,
-      y: center.y + axisX.y * halfWidth + axisY.y * halfLength
-    },
-    {
-      x: center.x + axisX.x * -halfWidth + axisY.x * halfLength,
-      y: center.y + axisX.y * -halfWidth + axisY.y * halfLength
-    }
-  ];
-  const footprint = render.map((point) => projector.pixelToLatLon(point.x, point.y));
+  const centerLatLon = projector.pixelToLatLon(center.x, center.y);
+  let render: RenderPoint[] | undefined;
+  let footprintLatLon: GeoPoint[] = [];
+  if (footprint.length >= 3) {
+    render = footprint.map((point) => {
+      const scaledX = point.x * pixelsPerMeterX;
+      const scaledY = point.y * pixelsPerMeterY;
+      return {
+        x: center.x + axisX.x * scaledX + axisY.x * scaledY,
+        y: center.y + axisX.y * scaledX + axisY.y * scaledY
+      };
+    });
+    footprintLatLon = render.map((point) => projector.pixelToLatLon(point.x, point.y));
+  }
   return {
     kind: "structure",
     id: "structure:primary",
-    footprint,
+    mode: structure.mode,
+    footprint: footprintLatLon,
     heightMeters,
-    render
+    render,
+    center: centerLatLon,
+    imported: structure.mode === "imported" ? structure.imported : undefined
   };
 }
 

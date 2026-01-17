@@ -1,5 +1,12 @@
 import { buildGraph, GraphNode } from "./graph";
-import { demandWeightForClass, laneCapacityFactor, resolveLaneCounts } from "./lanes";
+import type { Graph, GraphEdge, GraphMovement } from "./graph";
+import {
+  demandWeightForClass,
+  inferDedicatedTurnLane,
+  laneCapacityFactor,
+  resolveLaneCounts,
+  selectTurnLaneTag
+} from "./lanes";
 import {
   BuildingEndpointIndex,
   ParcelEndpointIndex,
@@ -8,9 +15,11 @@ import {
   pickEpicenterNodes,
   pickRandomNode,
 } from "./endpoints";
+import { inferJobCenterEpicenters } from "./epicenter";
 import { findTopKPaths } from "./routing";
 import {
   LatLon,
+  Building,
   Road,
   RoadClass,
   RoadId,
@@ -47,6 +56,10 @@ const BOUNDARY_NODE_BUFFER_M = 220;
 const SIGNAL_NODE_MAX_DIST_M = 35;
 const SIGNAL_DELAY_SEC = 10;
 const VIEWER_SAMPLE_SPACING_M = 30;
+const TURN_ARC_APPROACH_M = 20;
+const TURN_ARC_MIN_EDGE_M = 8;
+const TURN_LANE_DWELL_MULTIPLIER = 1.5;
+const TURN_LANE_HEADING_SHIFT_DEG = 12;
 const METERS_PER_DEG_LAT = 111_320;
 const MAJOR_ROAD_CLASSES: Set<RoadClass> = new Set([
   "motorway",
@@ -92,7 +105,8 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
     nodeUniverse,
     simBounds,
     config.epicenter ?? null,
-    epicenterRadiusM
+    epicenterRadiusM,
+    request.buildings
   );
   const epicenters: TrafficEpicenter[] = epicenterPools.map((pool) => ({
     point: pool.point,
@@ -128,9 +142,15 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
   const countsByPreset = new Map<TrafficPresetName, Map<RoadId, DirectionCounts>>();
   const demandWeights = new Map<RoadId, number>();
   const laneWeights = new Map<RoadId, { forward: number; backward: number }>();
+  const laneCountsByRoad = new Map<RoadId, { forward: number; backward: number; total: number }>();
   for (const road of roads) {
     demandWeights.set(road.id, demandWeightForClass(road.class));
     const laneCounts = resolveLaneCounts(road);
+    laneCountsByRoad.set(road.id, {
+      total: laneCounts.total,
+      forward: laneCounts.forward,
+      backward: laneCounts.backward
+    });
     const forwardLanes = laneCounts.forward > 0 ? laneCounts.forward : Math.max(1, laneCounts.total);
     const backwardLanes = laneCounts.backward > 0 ? laneCounts.backward : Math.max(1, laneCounts.total);
     laneWeights.set(road.id, {
@@ -139,6 +159,7 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
     });
   }
   const edgeCounts = new Map<string, number>();
+  const movementCounts = new Map<string, number>();
   let totalTrips = 0;
   let cancelled = false;
 
@@ -193,6 +214,20 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
           } else {
             record.backward += weighted;
           }
+        }
+        for (let i = 0; i < path.edges.length - 1; i += 1) {
+          const inEdge = path.edges[i];
+          const outEdge = path.edges[i + 1];
+          const movementKey = `${inEdge.id}|${outEdge.id}`;
+          if (!graph.movementByEdgePair.has(movementKey)) {
+            continue;
+          }
+          const demandWeight = demandWeights.get(inEdge.roadId) ?? 1;
+          const laneWeight = inEdge.forward
+            ? laneWeights.get(inEdge.roadId)?.forward ?? 1
+            : laneWeights.get(inEdge.roadId)?.backward ?? 1;
+          const weighted = pathWeight * demandWeight * laneWeight;
+          movementCounts.set(movementKey, (movementCounts.get(movementKey) ?? 0) + weighted);
         }
       }
 
@@ -250,7 +285,10 @@ export function simulateTraffic(request: TrafficSimRequest, options: SimOptions 
   const edgeTraffic = buildEdgeTraffic(graph, edgeCounts, signalDelayByEdge);
   const viewerSamples = buildTrafficViewerSamples(
     graph,
+    roads,
+    laneCountsByRoad,
     edgeCounts,
+    movementCounts,
     signalDelayByEdge,
     frameBounds
   );
@@ -430,13 +468,14 @@ function resolveEpicenterPools(
   nodes: GraphNode[],
   simBounds: { north: number; south: number; east: number; west: number },
   manualEpicenter: LatLon | null,
-  radiusM: number
+  radiusM: number,
+  buildings: Building[] | undefined
 ): EpicenterPool[] {
   const resolvedRadius = radiusM > 0 ? radiusM : DEFAULT_EPICENTER_RADIUS_M;
   if (manualEpicenter) {
     return [buildEpicenterPool(manualEpicenter, nodes, resolvedRadius, undefined, 1)];
   }
-  const inferred = inferEpicenterPools(roads, nodes, simBounds, resolvedRadius);
+  const inferred = inferEpicenterPools(roads, nodes, simBounds, resolvedRadius, buildings);
   if (inferred.length) {
     return inferred;
   }
@@ -451,8 +490,26 @@ function inferEpicenterPools(
   roads: Road[],
   nodes: GraphNode[],
   bounds: { north: number; south: number; east: number; west: number },
-  radiusM: number
+  radiusM: number,
+  buildings: Building[] | undefined
 ): EpicenterPool[] {
+  const activityEpicenters = inferJobCenterEpicenters({
+    simBounds: bounds,
+    roads,
+    buildings
+  });
+  if (activityEpicenters.length) {
+    const totalWeight = activityEpicenters.reduce((sum, entry) => sum + entry.weight, 0);
+    return activityEpicenters.map((entry) =>
+      buildEpicenterPool(
+        { lat: entry.lat, lon: entry.lon },
+        nodes,
+        radiusM,
+        undefined,
+        totalWeight > 0 ? entry.weight / totalWeight : 1 / activityEpicenters.length
+      )
+    );
+  }
   const crossings = findBoundaryCrossings(roads, bounds);
   if (!crossings.length) {
     return [];
@@ -795,23 +852,50 @@ function buildEdgeTraffic(
   return edgeTraffic;
 }
 
-function buildTrafficViewerSamples(
-  graph: {
-    edges: {
-      id: string;
-      from: string;
-      to: string;
-      lengthM: number;
-      baseTimeS: number;
-      speedMps: number;
-    }[];
-    nodes: Map<string, GraphNode>;
-  },
+export function buildTrafficViewerSamples(
+  graph: Graph,
+  roads: Road[],
+  laneCountsByRoad: Map<RoadId, { forward: number; backward: number; total: number }>,
   edgeCounts: Map<string, number>,
+  movementCounts: Map<string, number>,
   signalDelayByEdge: Map<string, number>,
   frameBounds: { north: number; south: number; east: number; west: number }
 ): TrafficViewerSample[] {
   const samples: TrafficViewerSample[] = [];
+  const edgeById = new Map<string, GraphEdge>();
+  for (const edge of graph.edges) {
+    edgeById.set(edge.id, edge);
+  }
+  const roadById = new Map<RoadId, Road>();
+  for (const road of roads) {
+    roadById.set(road.id, road);
+  }
+  const movementsByFromEdge = new Map<string, GraphMovement[]>();
+  for (const movement of graph.movementByEdgePair.values()) {
+    const list = movementsByFromEdge.get(movement.fromEdgeId);
+    if (list) {
+      list.push(movement);
+    } else {
+      movementsByFromEdge.set(movement.fromEdgeId, [movement]);
+    }
+  }
+  const straightLaneCache = new Map<string, number | null>();
+  for (const [edgeId, movements] of movementsByFromEdge.entries()) {
+    const straight = movements
+      .filter((movement) => movement.turn === "straight")
+      .sort((a, b) => Math.abs(a.angleDeg) - Math.abs(b.angleDeg))[0];
+    if (!straight) {
+      straightLaneCache.set(edgeId, null);
+      continue;
+    }
+    const outEdge = edgeById.get(straight.toEdgeId);
+    if (!outEdge) {
+      straightLaneCache.set(edgeId, null);
+      continue;
+    }
+    straightLaneCache.set(edgeId, resolveDirectionalLanes(outEdge, laneCountsByRoad));
+  }
+
   for (const edge of graph.edges) {
     const flow = edgeCounts.get(edge.id) ?? 0;
     if (flow <= 0) {
@@ -822,32 +906,128 @@ function buildTrafficViewerSamples(
     if (!fromNode || !toNode) {
       continue;
     }
-    const midpoint = {
-      lat: (fromNode.lat + toNode.lat) / 2,
-      lon: (fromNode.lon + toNode.lon) / 2
-    };
-    if (!isWithinBounds(midpoint, frameBounds)) {
-      continue;
-    }
     const delay = signalDelayByEdge.get(edge.id) ?? 0;
-    const dwellFactor = computeDwellFactor(edge.baseTimeS, delay);
-    const weight = flow * dwellFactor;
-    if (weight <= 0) {
-      continue;
-    }
-    const steps = Math.max(1, Math.round(edge.lengthM / VIEWER_SAMPLE_SPACING_M));
-    const heading = bearingDegrees(fromNode, toNode);
+    const baseDwell = computeDwellFactor(edge.baseTimeS, delay);
     const speedMps =
       edge.baseTimeS + delay > 0 ? edge.lengthM / (edge.baseTimeS + delay) : edge.speedMps;
-    for (let i = 0; i < steps; i += 1) {
-      const t = (i + 0.5) / steps;
-      samples.push({
-        lat: fromNode.lat + (toNode.lat - fromNode.lat) * t,
-        lon: fromNode.lon + (toNode.lon - fromNode.lon) * t,
-        heading,
-        weight,
-        speedMps: Number.isFinite(speedMps) ? speedMps : undefined
+    const movements = movementsByFromEdge.get(edge.id) ?? [];
+    let turnFlow = 0;
+    for (const movement of movements) {
+      if (movement.turn === "straight") {
+        continue;
+      }
+      turnFlow += movementCounts.get(`${edge.id}|${movement.toEdgeId}`) ?? 0;
+    }
+    const throughFlow = Math.max(0, flow - turnFlow);
+    if (throughFlow > 0) {
+      const steps = Math.max(1, Math.round(edge.lengthM / VIEWER_SAMPLE_SPACING_M));
+      const heading = bearingDegrees(fromNode, toNode);
+      for (let i = 0; i < steps; i += 1) {
+        const t = (i + 0.5) / steps;
+        const lat = fromNode.lat + (toNode.lat - fromNode.lat) * t;
+        const lon = fromNode.lon + (toNode.lon - fromNode.lon) * t;
+        if (!isWithinBounds({ lat, lon }, frameBounds)) {
+          continue;
+        }
+        samples.push({
+          lat,
+          lon,
+          headingDeg: heading,
+          weight: throughFlow,
+          dwellFactor: baseDwell,
+          laneType: "through",
+          speedMps: Number.isFinite(speedMps) ? speedMps : undefined
+        });
+      }
+    }
+
+    for (const movement of movements) {
+      if (movement.turn === "straight") {
+        continue;
+      }
+      const movementFlow = movementCounts.get(`${edge.id}|${movement.toEdgeId}`) ?? 0;
+      if (movementFlow <= 0) {
+        continue;
+      }
+      const outEdge = edgeById.get(movement.toEdgeId);
+      if (!outEdge) {
+        continue;
+      }
+      const outNode = graph.nodes.get(outEdge.to);
+      if (!outNode) {
+        continue;
+      }
+      const laneType = movement.turn === "left" ? "turn_left" : "turn_right";
+      const incomingLanes = resolveDirectionalLanes(edge, laneCountsByRoad);
+      const straightLanes = straightLaneCache.get(edge.id) ?? null;
+      const road = roadById.get(edge.roadId);
+      const direction = edge.forward ? "forward" : "backward";
+      const turnLanesTag = road ? selectTurnLaneTag(road, direction) : undefined;
+      const dedicatedTurnLane = inferDedicatedTurnLane({
+        movement: movement.turn,
+        incomingLanes,
+        straightLanes,
+        turnLanesTag
       });
+      const dwellFactor =
+        baseDwell * (dedicatedTurnLane ? TURN_LANE_DWELL_MULTIPLIER : 1);
+      const headingShift = dedicatedTurnLane
+        ? movement.turn === "left"
+          ? -TURN_LANE_HEADING_SHIFT_DEG
+          : TURN_LANE_HEADING_SHIFT_DEG
+        : 0;
+      const approachDistM = Math.min(TURN_ARC_APPROACH_M, edge.lengthM * 0.45);
+      const departDistM = Math.min(TURN_ARC_APPROACH_M, outEdge.lengthM * 0.45);
+
+      if (edge.lengthM <= TURN_ARC_MIN_EDGE_M || outEdge.lengthM <= TURN_ARC_MIN_EDGE_M) {
+        if (isWithinBounds({ lat: toNode.lat, lon: toNode.lon }, frameBounds)) {
+          samples.push({
+            lat: toNode.lat,
+            lon: toNode.lon,
+            headingDeg: normalizeHeadingDeg(movement.outgoingBearing + headingShift),
+            weight: movementFlow,
+            dwellFactor,
+            laneType,
+            speedMps: Number.isFinite(speedMps) ? speedMps : undefined
+          });
+        }
+        continue;
+      }
+
+      const approachPoint = interpolateLatLon(
+        fromNode,
+        toNode,
+        1 - approachDistM / Math.max(1, edge.lengthM)
+      );
+      const departPoint = interpolateLatLon(
+        toNode,
+        outNode,
+        departDistM / Math.max(1, outEdge.lengthM)
+      );
+      const steps = Math.max(
+        3,
+        Math.round((approachDistM + departDistM) / (VIEWER_SAMPLE_SPACING_M * 0.6))
+      );
+      for (let i = 0; i < steps; i += 1) {
+        const t = (i + 0.5) / steps;
+        const point = bezierPoint(approachPoint, toNode, departPoint, t);
+        if (!isWithinBounds(point, frameBounds)) {
+          continue;
+        }
+        let headingDeg = bezierHeadingDeg(approachPoint, toNode, departPoint, t, toNode.lat);
+        if (headingShift !== 0 && t < 0.5) {
+          headingDeg = normalizeHeadingDeg(headingDeg + headingShift);
+        }
+        samples.push({
+          lat: point.lat,
+          lon: point.lon,
+          headingDeg,
+          weight: movementFlow,
+          dwellFactor,
+          laneType,
+          speedMps: Number.isFinite(speedMps) ? speedMps : undefined
+        });
+      }
     }
   }
   return samples;
@@ -858,6 +1038,54 @@ function computeDwellFactor(baseTimeS: number, delayS: number): number {
     return 1;
   }
   return Math.max(1, 1 + delayS / baseTimeS);
+}
+
+function resolveDirectionalLanes(
+  edge: GraphEdge,
+  laneCountsByRoad: Map<RoadId, { forward: number; backward: number; total: number }>
+): number {
+  const laneCounts = laneCountsByRoad.get(edge.roadId);
+  if (!laneCounts) {
+    return 1;
+  }
+  if (edge.forward) {
+    return laneCounts.forward > 0 ? laneCounts.forward : laneCounts.total;
+  }
+  return laneCounts.backward > 0 ? laneCounts.backward : laneCounts.total;
+}
+
+function interpolateLatLon(start: LatLon, end: LatLon, t: number): LatLon {
+  const clamped = clamp(t, 0, 1);
+  return {
+    lat: start.lat + (end.lat - start.lat) * clamped,
+    lon: start.lon + (end.lon - start.lon) * clamped
+  };
+}
+
+function bezierPoint(p0: LatLon, p1: LatLon, p2: LatLon, t: number): LatLon {
+  const inv = 1 - t;
+  const a = inv * inv;
+  const b = 2 * inv * t;
+  const c = t * t;
+  return {
+    lat: a * p0.lat + b * p1.lat + c * p2.lat,
+    lon: a * p0.lon + b * p1.lon + c * p2.lon
+  };
+}
+
+function bezierHeadingDeg(p0: LatLon, p1: LatLon, p2: LatLon, t: number, refLat: number): number {
+  const inv = 1 - t;
+  const dLat = 2 * inv * (p1.lat - p0.lat) + 2 * t * (p2.lat - p1.lat);
+  const dLon = 2 * inv * (p1.lon - p0.lon) + 2 * t * (p2.lon - p1.lon);
+  const x = dLon * metersPerDegreeLon(refLat);
+  const y = dLat * METERS_PER_DEG_LAT;
+  const bearing = (Math.atan2(x, y) * 180) / Math.PI;
+  return normalizeHeadingDeg(bearing);
+}
+
+function normalizeHeadingDeg(heading: number): number {
+  const normalized = heading % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
 }
 
 function normalizeRoadClass(roadClass?: RoadClass): RoadClass | null {

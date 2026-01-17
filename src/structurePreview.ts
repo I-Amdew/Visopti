@@ -1,6 +1,5 @@
 export interface StructurePreviewGeometry {
-  widthM: number;
-  lengthM: number;
+  footprint: { x: number; y: number }[];
   heightM: number;
   baseM: number;
 }
@@ -58,7 +57,16 @@ export function createStructurePreview(canvas: HTMLCanvasElement): StructurePrev
     throw new Error("Preview canvas 2D context unavailable.");
   }
 
-  let structure: StructurePreviewGeometry = { widthM: 10, lengthM: 10, heightM: 4, baseM: 0 };
+  let structure: StructurePreviewGeometry = {
+    footprint: [
+      { x: -5, y: -5 },
+      { x: 5, y: -5 },
+      { x: 5, y: 5 },
+      { x: -5, y: 5 }
+    ],
+    heightM: 4,
+    baseM: 0
+  };
   let viewWidth = 0;
   let viewHeight = 0;
   let spinning = false;
@@ -115,28 +123,47 @@ export function createStructurePreview(canvas: HTMLCanvasElement): StructurePrev
     ctx.closePath();
     ctx.fill();
 
-    const widthM = Math.max(0.1, structure.widthM);
-    const lengthM = Math.max(0.1, structure.lengthM);
+    const fallbackFootprint = [
+      { x: -5, y: -5 },
+      { x: 5, y: -5 },
+      { x: 5, y: 5 },
+      { x: -5, y: 5 }
+    ];
+    const footprint = structure.footprint.length >= 3 ? structure.footprint : fallbackFootprint;
+    const bounds = footprint.reduce(
+      (acc, point) => ({
+        minX: Math.min(acc.minX, point.x),
+        maxX: Math.max(acc.maxX, point.x),
+        minY: Math.min(acc.minY, point.y),
+        maxY: Math.max(acc.maxY, point.y)
+      }),
+      {
+        minX: Number.POSITIVE_INFINITY,
+        maxX: Number.NEGATIVE_INFINITY,
+        minY: Number.POSITIVE_INFINITY,
+        maxY: Number.NEGATIVE_INFINITY
+      }
+    );
+    const widthM = Math.max(0.1, bounds.maxX - bounds.minX);
+    const lengthM = Math.max(0.1, bounds.maxY - bounds.minY);
     const heightM = Math.max(0.1, structure.heightM);
     const baseM = Number.isFinite(structure.baseM) ? Math.max(0, structure.baseM) : 0;
     const maxDim = Math.max(widthM, lengthM, heightM);
     const target = Math.min(viewWidth, viewHeight) * 0.6;
     const scale = target / maxDim;
 
-    const halfW = widthM / 2;
-    const halfL = lengthM / 2;
-    const vertices: Vec3[] = [
-      { x: -halfW, y: -halfL, z: 0 },
-      { x: halfW, y: -halfL, z: 0 },
-      { x: halfW, y: halfL, z: 0 },
-      { x: -halfW, y: halfL, z: 0 },
-      { x: -halfW, y: -halfL, z: heightM },
-      { x: halfW, y: -halfL, z: heightM },
-      { x: halfW, y: halfL, z: heightM },
-      { x: -halfW, y: halfL, z: heightM }
-    ];
-
-    const rotated = vertices.map((v) => rotatePoint(v, yaw, tilt));
+    const center = {
+      x: (bounds.minX + bounds.maxX) / 2,
+      y: (bounds.minY + bounds.maxY) / 2
+    };
+    const baseVertices: Vec3[] = footprint.map((point) => ({
+      x: point.x - center.x,
+      y: point.y - center.y,
+      z: 0
+    }));
+    const topVertices: Vec3[] = baseVertices.map((point) => ({ ...point, z: heightM }));
+    const allVertices = [...baseVertices, ...topVertices];
+    const rotated = allVertices.map((v) => rotatePoint(v, yaw, tilt));
     const projected: Vec2[] = rotated.map((v) => ({
       x: centerX + v.x * scale,
       y: centerY - v.y * scale,
@@ -148,7 +175,7 @@ export function createStructurePreview(canvas: HTMLCanvasElement): StructurePrev
     if (tilt < 0.02) {
       drawPolygon(
         ctx,
-        [projected[4], projected[5], projected[6], projected[7]],
+        projected.slice(baseVertices.length),
         "rgba(92, 194, 242, 0.55)",
         stroke
       );
@@ -158,13 +185,19 @@ export function createStructurePreview(canvas: HTMLCanvasElement): StructurePrev
       return;
     }
 
-    const faces = [
-      { idx: [4, 5, 6, 7], fill: "rgba(110, 212, 255, 0.75)" },
-      { idx: [0, 1, 5, 4], fill: "rgba(70, 147, 191, 0.8)" },
-      { idx: [1, 2, 6, 5], fill: "rgba(60, 132, 173, 0.8)" },
-      { idx: [2, 3, 7, 6], fill: "rgba(72, 150, 196, 0.8)" },
-      { idx: [3, 0, 4, 7], fill: "rgba(80, 161, 208, 0.8)" }
-    ];
+    const topOffset = baseVertices.length;
+    const faces = [];
+    for (let i = 0; i < baseVertices.length; i += 1) {
+      const next = (i + 1) % baseVertices.length;
+      faces.push({
+        idx: [i, next, topOffset + next, topOffset + i],
+        fill: i % 2 === 0 ? "rgba(70, 147, 191, 0.8)" : "rgba(60, 132, 173, 0.8)"
+      });
+    }
+    faces.push({
+      idx: baseVertices.map((_, index) => topOffset + index),
+      fill: "rgba(110, 212, 255, 0.75)"
+    });
 
     faces
       .map((face) => ({
@@ -214,7 +247,10 @@ export function createStructurePreview(canvas: HTMLCanvasElement): StructurePrev
   };
 
   const setStructure = (next: StructurePreviewGeometry) => {
-    structure = { ...next };
+    structure = {
+      ...next,
+      footprint: next.footprint.map((point) => ({ ...point }))
+    };
     render(spinning ? angle : 0, spinning ? SPIN_TILT : 0);
   };
 

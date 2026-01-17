@@ -1,4 +1,5 @@
 import { laneCapacityFactor, resolveLaneCounts } from "./lanes";
+import type { TurnDirection } from "./types";
 import { Road, RoadClass, RoadId } from "./types";
 
 export interface GraphNode {
@@ -19,11 +20,23 @@ export interface GraphEdge {
   forward: boolean;
 }
 
+export interface GraphMovement {
+  nodeId: string;
+  fromEdgeId: string;
+  toEdgeId: string;
+  turn: TurnDirection;
+  angleDeg: number;
+  incomingBearing: number;
+  outgoingBearing: number;
+}
+
 export interface Graph {
   nodes: Map<string, GraphNode>;
   edges: GraphEdge[];
   adjacency: Map<string, GraphEdge[]>;
   nodeList: GraphNode[];
+  movementByNode: Map<string, GraphMovement[]>;
+  movementByEdgePair: Map<string, GraphMovement>;
 }
 
 export interface GraphBuildOptions {
@@ -143,7 +156,66 @@ export function buildGraph(roads: Road[], options: GraphBuildOptions = {}): Grap
     }
   }
 
-  return { nodes, edges, adjacency, nodeList: Array.from(nodes.values()) };
+  const incoming = new Map<string, GraphEdge[]>();
+  for (const edge of edges) {
+    const list = incoming.get(edge.to);
+    if (list) {
+      list.push(edge);
+    } else {
+      incoming.set(edge.to, [edge]);
+    }
+  }
+
+  const movementByNode = new Map<string, GraphMovement[]>();
+  const movementByEdgePair = new Map<string, GraphMovement>();
+  for (const node of nodes.values()) {
+    const incomingEdges = incoming.get(node.id);
+    const outgoingEdges = adjacency.get(node.id);
+    if (!incomingEdges || !outgoingEdges) {
+      continue;
+    }
+    for (const inEdge of incomingEdges) {
+      const fromNode = nodes.get(inEdge.from);
+      if (!fromNode) {
+        continue;
+      }
+      const incomingBearing = bearingDegrees(fromNode, node);
+      for (const outEdge of outgoingEdges) {
+        const toNode = nodes.get(outEdge.to);
+        if (!toNode) {
+          continue;
+        }
+        const outgoingBearing = bearingDegrees(node, toNode);
+        const angleDeg = normalizeAngleDelta(outgoingBearing - incomingBearing);
+        const turn = classifyTurn(angleDeg);
+        const movement: GraphMovement = {
+          nodeId: node.id,
+          fromEdgeId: inEdge.id,
+          toEdgeId: outEdge.id,
+          turn,
+          angleDeg,
+          incomingBearing,
+          outgoingBearing
+        };
+        movementByEdgePair.set(`${inEdge.id}|${outEdge.id}`, movement);
+        const list = movementByNode.get(node.id);
+        if (list) {
+          list.push(movement);
+        } else {
+          movementByNode.set(node.id, [movement]);
+        }
+      }
+    }
+  }
+
+  return {
+    nodes,
+    edges,
+    adjacency,
+    nodeList: Array.from(nodes.values()),
+    movementByNode,
+    movementByEdgePair
+  };
 }
 
 function addAdjacency(adjacency: Map<string, GraphEdge[]>, nodeId: string, edge: GraphEdge): void {
@@ -199,6 +271,30 @@ function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number)
     Math.cos(rLat1) * Math.cos(rLat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return EARTH_RADIUS_M * c;
+}
+
+function bearingDegrees(start: { lat: number; lon: number }, end: { lat: number; lon: number }): number {
+  const lat1 = toRad(start.lat);
+  const lat2 = toRad(end.lat);
+  const dLon = toRad(end.lon - start.lon);
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  const bearing = (Math.atan2(y, x) * 180) / Math.PI;
+  return (bearing + 360) % 360;
+}
+
+function normalizeAngleDelta(angleDeg: number): number {
+  const normalized = ((angleDeg + 540) % 360) - 180;
+  return normalized;
+}
+
+const TURN_STRAIGHT_THRESHOLD_DEG = 30;
+
+function classifyTurn(angleDeg: number): TurnDirection {
+  if (Math.abs(angleDeg) <= TURN_STRAIGHT_THRESHOLD_DEG) {
+    return "straight";
+  }
+  return angleDeg > 0 ? "right" : "left";
 }
 
 function toRad(deg: number): number {

@@ -6,13 +6,15 @@ describe("project normalization", () => {
   it("normalizes legacy traffic values into hourly directional scores", () => {
     const settings: AppSettings = {
       siteHeightFt: 6,
-      viewerHeightFt: 6,
-      viewDistanceFt: 2000,
-      topoSpacingFt: 25,
-      sampleStepPx: 5,
-      frame: {
-        maxSideFt: 2640,
-        minSideFt: 300
+    viewerHeightFt: 6,
+    viewDistanceFt: 2000,
+    topoSpacingFt: 25,
+    sampleStepPx: 5,
+    forestK: 0.04,
+    denseCoverDensity: 0.6,
+    frame: {
+      maxSideFt: 2640,
+      minSideFt: 300
       },
       overlays: {
         showViewers: true,

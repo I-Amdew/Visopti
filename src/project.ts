@@ -2,6 +2,7 @@ import {
   AppSettings,
   Building,
   GeoBounds,
+  GeoPoint,
   MapPoint,
   ProjectPayload,
   ProjectState,
@@ -16,13 +17,17 @@ import {
   Shape,
   TrafficSignal,
   Tree,
+  DenseCover,
   ZoneType,
   StructureParams,
+  StructureMode,
+  ImportedModelRef,
   TrafficByRoadId,
   TrafficConfig,
   TrafficFlowDensity,
   TrafficDirectionalScores,
-  TrafficViewState
+  TrafficViewState,
+  StructureParamsV2
 } from "./types";
 import {
   DEFAULT_SIGN_DIMENSIONS,
@@ -37,7 +42,7 @@ import {
 import type { TileSourceId } from "./mapTiles";
 import { TILE_SOURCES } from "./mapTiles";
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 const HOURS_PER_DAY = 24;
 const TRAFFIC_HOUR_MIN = 6;
@@ -67,6 +72,7 @@ const ROAD_CLASS_SET = new Set<RoadClass>([
   "construction",
   "other"
 ]);
+const FEET_TO_METERS = 0.3048;
 
 export interface RuntimeProjectState {
   bounds: GeoBounds | null;
@@ -74,6 +80,7 @@ export interface RuntimeProjectState {
   basemapId?: TileSourceId;
   settings: AppSettings;
   shapes: Shape[];
+  denseCover?: DenseCover[];
   trees?: Tree[];
   signs?: Sign[];
   structure?: StructureParams;
@@ -104,6 +111,7 @@ export function serializeProject(state: RuntimeProjectState): ProjectPayload {
   const warnings: string[] = [];
   const settings = readSettings(state.settings, warnings);
   const shapes = readShapes(state.shapes, warnings);
+  const denseCover = readDenseCover(state.denseCover, warnings, "denseCover");
   const trees = readTrees(state.trees, warnings, "trees");
   const signs = readSigns(state.signs, warnings, "signs");
   const structure = readStructure(state.structure, warnings);
@@ -126,6 +134,7 @@ export function serializeProject(state: RuntimeProjectState): ProjectPayload {
     basemapId: resolveBasemapId(state),
     settings,
     shapes,
+    denseCover,
     structure,
     autoRoads: normalizeTrafficScores(autoRoads, trafficConfig),
     autoBuildings,
@@ -313,6 +322,7 @@ function normalizePayload(raw: unknown, warnings: string[]): ProjectState {
   const basemapId = readBasemapId(raw.basemapId ?? raw.basemapMode, warnings);
   const settings = readSettings(raw.settings, warnings);
   const shapes = readShapes(raw.shapes, warnings);
+  const denseCover = readDenseCover(raw.denseCover, warnings, "denseCover");
   const structure = readStructure(raw.structure, warnings);
 
   if (schemaVersion < 2) {
@@ -322,6 +332,7 @@ function normalizePayload(raw: unknown, warnings: string[]): ProjectState {
       basemapId,
       settings,
       shapes,
+      denseCover,
       structure
     };
   }
@@ -331,6 +342,7 @@ function normalizePayload(raw: unknown, warnings: string[]): ProjectState {
     basemapId,
     settings,
     shapes,
+    denseCover,
     trees: readTrees(raw.trees, warnings, "trees"),
     signs: readSigns(raw.signs, warnings, "signs"),
     structure,
@@ -367,6 +379,7 @@ function toRuntimeState(payload: ProjectState, warnings: string[]): RuntimeProje
     basemapId: payload.basemapId,
     settings: payload.settings,
     shapes: payload.shapes,
+    denseCover: payload.denseCover,
     trees: payload.trees,
     signs: payload.signs,
     structure: payload.structure,
@@ -457,6 +470,7 @@ function createDefaultProjectState(): ProjectState {
     basemapId: DEFAULT_BASEMAP_ID,
     settings: createDefaultSettings(),
     shapes: [],
+    denseCover: [],
     trees: [],
     signs: [],
     structure: createDefaultStructure(),
@@ -472,15 +486,22 @@ function createDefaultProjectState(): ProjectState {
 }
 
 function createDefaultStructure(): StructureParams {
+  const legacyWidthFt = 60;
+  const legacyLengthFt = 90;
+  const widthM = legacyWidthFt * FEET_TO_METERS;
+  const lengthM = legacyLengthFt * FEET_TO_METERS;
   return {
-    heightFt: 30,
+    version: 2,
+    mode: "parametric",
     footprint: {
-      widthFt: 60,
-      lengthFt: 90
+      points: buildRectFootprintPoints(widthM, lengthM)
     },
+    heightMeters: 30 * FEET_TO_METERS,
     placeAtCenter: true,
     centerPx: { x: 0, y: 0 },
-    rotationDeg: 0
+    rotationDeg: 0,
+    legacyWidthFt,
+    legacyLengthFt
   };
 }
 
@@ -491,6 +512,8 @@ function createDefaultSettings(): AppSettings {
     viewDistanceFt: 2000,
     topoSpacingFt: 25,
     sampleStepPx: 5,
+    forestK: 0.04,
+    denseCoverDensity: 0.6,
     frame: {
       maxSideFt: 2640,
       minSideFt: 300
@@ -729,47 +752,236 @@ function readSettings(value: unknown, warnings: string[]): AppSettings {
       warnings,
       "settings.sampleStepPx"
     ),
+    forestK: readNumber(value.forestK, defaults.forestK, warnings, "settings.forestK"),
+    denseCoverDensity: clampValue(
+      readNumber(
+        value.denseCoverDensity,
+        defaults.denseCoverDensity,
+        warnings,
+        "settings.denseCoverDensity"
+      ),
+      0,
+      1
+    ),
     frame: readFrameSettings(value.frame, defaults.frame, warnings),
     overlays: readOverlaySettings(value.overlays, defaults.overlays, warnings),
     opacity: readOpacitySettings(value.opacity, defaults.opacity, warnings)
   };
 }
 
-function readStructure(value: unknown, warnings: string[]): StructureParams {
-  const defaults = createDefaultStructure();
-  if (!isRecord(value)) {
-    if (value !== undefined) {
-      warnings.push("Invalid structure; using defaults.");
-    }
-    return defaults;
+function buildRectFootprintPoints(widthM: number, lengthM: number): { x: number; y: number }[] {
+  const halfWidth = Math.max(0.1, widthM / 2);
+  const halfLength = Math.max(0.1, lengthM / 2);
+  return [
+    { x: -halfWidth, y: -halfLength },
+    { x: halfWidth, y: -halfLength },
+    { x: halfWidth, y: halfLength },
+    { x: -halfWidth, y: halfLength }
+  ];
+}
+
+function readFootprintPoints(
+  value: unknown,
+  warnings: string[],
+  path: string
+): { x: number; y: number }[] {
+  if (value === undefined || value === null) {
+    return [];
   }
+  if (!Array.isArray(value)) {
+    warnings.push(`Invalid ${path}; expected array.`);
+    return [];
+  }
+  const points: { x: number; y: number }[] = [];
+  let invalid = false;
+  value.forEach((entry) => {
+    if (!isRecord(entry)) {
+      invalid = true;
+      return;
+    }
+    const x = entry.x;
+    const y = entry.y;
+    if (!isFiniteNumber(x) || !isFiniteNumber(y)) {
+      invalid = true;
+      return;
+    }
+    points.push({ x, y });
+  });
+  if (invalid && points.length === 0) {
+    warnings.push(`Invalid ${path}; using defaults.`);
+  }
+  return points;
+}
+
+function readOptionalPositiveNumber(
+  value: unknown,
+  warnings: string[],
+  path: string
+): number | undefined {
+  const parsed = readOptionalNumber(value, warnings, path);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (parsed > 0) {
+    return parsed;
+  }
+  warnings.push(`Invalid ${path}; ignoring.`);
+  return undefined;
+}
+
+function clampValue(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function readFacePriority(
+  value: unknown,
+  warnings: string[]
+): StructureParamsV2["facePriority"] {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    warnings.push("Invalid structure.facePriority; ignoring.");
+    return undefined;
+  }
+  const primaryEdgeIndex = readOptionalNumber(
+    value.primaryEdgeIndex,
+    warnings,
+    "structure.facePriority.primaryEdgeIndex"
+  );
+  const arcDeg = value.arcDeg;
+  if (
+    primaryEdgeIndex === undefined ||
+    !Number.isFinite(primaryEdgeIndex) ||
+    (arcDeg !== 180 && arcDeg !== 270)
+  ) {
+    warnings.push("Invalid structure.facePriority; ignoring.");
+    return undefined;
+  }
+  return {
+    primaryEdgeIndex: Math.max(0, Math.floor(primaryEdgeIndex)),
+    arcDeg
+  };
+}
+
+function readStructureMode(
+  value: unknown,
+  warnings: string[],
+  fallback: StructureMode
+): StructureMode {
+  if (value === "parametric" || value === "imported") {
+    return value;
+  }
+  if (value !== undefined) {
+    warnings.push("Invalid structure.mode; using default.");
+  }
+  return fallback;
+}
+
+function readImportedModelRef(value: unknown, warnings: string[]): ImportedModelRef | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    warnings.push("Invalid structure.imported; ignoring.");
+    return undefined;
+  }
+  if (typeof value.assetId !== "string" || value.assetId.length === 0) {
+    warnings.push("Invalid structure.imported.assetId; ignoring imported model.");
+    return undefined;
+  }
+  const format = value.format;
+  if (format !== "glb" && format !== "gltf" && format !== "obj" && format !== "stl") {
+    warnings.push("Invalid structure.imported.format; ignoring imported model.");
+    return undefined;
+  }
+  const scaleRaw = readOptionalNumber(value.scale, warnings, "structure.imported.scale");
+  let scale = 1;
+  if (scaleRaw !== undefined) {
+    if (scaleRaw > 0) {
+      scale = scaleRaw;
+    } else {
+      warnings.push("Invalid structure.imported.scale; using 1.");
+    }
+  }
+  const rotationRaw = readOptionalNumber(value.rotationDeg, warnings, "structure.imported.rotationDeg");
+  const rotationDeg = Number.isFinite(rotationRaw) ? (rotationRaw as number) : 0;
+  const offsetValue = isRecord(value.offset) ? value.offset : {};
+  const readOffsetAxis = (axisValue: unknown, path: string) => {
+    if (axisValue === undefined || axisValue === null) {
+      return 0;
+    }
+    if (isFiniteNumber(axisValue)) {
+      return axisValue;
+    }
+    warnings.push(`Invalid ${path}; using 0.`);
+    return 0;
+  };
+  const offset = {
+    x: readOffsetAxis(offsetValue.x, "structure.imported.offset.x"),
+    y: readOffsetAxis(offsetValue.y, "structure.imported.offset.y"),
+    z: readOffsetAxis(offsetValue.z, "structure.imported.offset.z")
+  };
+  const proxyValue = isRecord(value.footprintProxy) ? value.footprintProxy : null;
+  const proxyPoints = readFootprintPoints(
+    proxyValue?.points,
+    warnings,
+    "structure.imported.footprintProxy.points"
+  );
+  if (proxyPoints.length > 0 && proxyPoints.length < 3) {
+    warnings.push("Invalid structure.imported.footprintProxy; ignoring.");
+  }
+  const footprintProxy = proxyPoints.length >= 3 ? { points: proxyPoints } : undefined;
+  return {
+    assetId: value.assetId,
+    name: typeof value.name === "string" ? value.name : value.assetId,
+    format,
+    scale,
+    rotationDeg,
+    offset,
+    footprintProxy
+  };
+}
+
+function isStructureV2Payload(value: Record<string, unknown>): boolean {
+  if (value.version === 2 || value.mode === "parametric" || value.mode === "imported") {
+    return true;
+  }
+  const footprint = isRecord(value.footprint) ? value.footprint : null;
+  if (footprint && Array.isArray(footprint.points)) {
+    return true;
+  }
+  if (isRecord(value.imported)) {
+    return true;
+  }
+  if (isFiniteNumber(value.heightMeters)) {
+    return true;
+  }
+  return false;
+}
+
+function readStructureV2(
+  value: Record<string, unknown>,
+  warnings: string[],
+  defaults: StructureParamsV2
+): StructureParamsV2 {
   const footprint = isRecord(value.footprint) ? value.footprint : {};
   const center = isRecord(value.centerPx) ? value.centerPx : {};
+  const points = readFootprintPoints(footprint.points, warnings, "structure.footprint.points");
+  const normalizedPoints =
+    points.length >= 3 ? points : defaults.footprint.points.map((point) => ({ ...point }));
+  const mode = readStructureMode(value.mode, warnings, defaults.mode);
+  const imported = readImportedModelRef(value.imported, warnings);
   return {
-    heightFt: Math.max(
-      1,
-      readNumber(value.heightFt, defaults.heightFt, warnings, "structure.heightFt")
-    ),
+    version: 2,
+    mode,
     footprint: {
-      widthFt: Math.max(
-        1,
-        readNumber(
-          footprint.widthFt,
-          defaults.footprint.widthFt,
-          warnings,
-          "structure.footprint.widthFt"
-        )
-      ),
-      lengthFt: Math.max(
-        1,
-        readNumber(
-          footprint.lengthFt,
-          defaults.footprint.lengthFt,
-          warnings,
-          "structure.footprint.lengthFt"
-        )
-      )
+      points: normalizedPoints
     },
+    heightMeters: Math.max(
+      1,
+      readNumber(value.heightMeters, defaults.heightMeters, warnings, "structure.heightMeters")
+    ),
     placeAtCenter: readBoolean(
       value.placeAtCenter,
       defaults.placeAtCenter,
@@ -785,8 +997,84 @@ function readStructure(value: unknown, warnings: string[]): StructureParams {
       defaults.rotationDeg,
       warnings,
       "structure.rotationDeg"
-    )
+    ),
+    facePriority: readFacePriority(value.facePriority, warnings),
+    legacyWidthFt: readOptionalPositiveNumber(
+      value.legacyWidthFt,
+      warnings,
+      "structure.legacyWidthFt"
+    ),
+    legacyLengthFt: readOptionalPositiveNumber(
+      value.legacyLengthFt,
+      warnings,
+      "structure.legacyLengthFt"
+    ),
+    imported
   };
+}
+
+function migrateStructureV1(
+  value: Record<string, unknown>,
+  warnings: string[],
+  defaults: StructureParamsV2
+): StructureParamsV2 {
+  const fallbackWidthFt = defaults.legacyWidthFt ?? 60;
+  const fallbackLengthFt = defaults.legacyLengthFt ?? 90;
+  const fallbackHeightFt = defaults.heightMeters / FEET_TO_METERS;
+  const footprint = isRecord(value.footprint) ? value.footprint : {};
+  const center = isRecord(value.centerPx) ? value.centerPx : {};
+  const widthFt = Math.max(
+    1,
+    readNumber(footprint.widthFt, fallbackWidthFt, warnings, "structure.footprint.widthFt")
+  );
+  const lengthFt = Math.max(
+    1,
+    readNumber(footprint.lengthFt, fallbackLengthFt, warnings, "structure.footprint.lengthFt")
+  );
+  const heightFt = Math.max(
+    1,
+    readNumber(value.heightFt, fallbackHeightFt, warnings, "structure.heightFt")
+  );
+  return {
+    version: 2,
+    mode: "parametric",
+    footprint: {
+      points: buildRectFootprintPoints(widthFt * FEET_TO_METERS, lengthFt * FEET_TO_METERS)
+    },
+    heightMeters: heightFt * FEET_TO_METERS,
+    placeAtCenter: readBoolean(
+      value.placeAtCenter,
+      defaults.placeAtCenter,
+      warnings,
+      "structure.placeAtCenter"
+    ),
+    centerPx: {
+      x: readNumber(center.x, defaults.centerPx.x, warnings, "structure.centerPx.x"),
+      y: readNumber(center.y, defaults.centerPx.y, warnings, "structure.centerPx.y")
+    },
+    rotationDeg: readNumber(
+      value.rotationDeg,
+      defaults.rotationDeg,
+      warnings,
+      "structure.rotationDeg"
+    ),
+    legacyWidthFt: widthFt,
+    legacyLengthFt: lengthFt
+  };
+}
+
+function readStructure(value: unknown, warnings: string[]): StructureParams {
+  const defaults = createDefaultStructure();
+  if (!isRecord(value)) {
+    if (value !== undefined) {
+      warnings.push("Invalid structure; using defaults.");
+    }
+    return defaults;
+  }
+  if (isStructureV2Payload(value)) {
+    return readStructureV2(value, warnings, defaults);
+  }
+  return migrateStructureV1(value, warnings, defaults);
 }
 
 function readFrameSettings(
@@ -896,6 +1184,70 @@ function readShapes(value: unknown, warnings: string[]): Shape[] {
     }
   });
   return shapes;
+}
+
+function readDenseCover(value: unknown, warnings: string[], path: string): DenseCover[] {
+  const raw = readArray(value, warnings, path, true);
+  const denseCover: DenseCover[] = [];
+  raw.forEach((entry, index) => {
+    const parsed = readDenseCoverItem(entry, warnings, `${path}[${index}]`, index);
+    if (parsed) {
+      denseCover.push(parsed);
+    }
+  });
+  return denseCover;
+}
+
+function readDenseCoverItem(
+  value: unknown,
+  warnings: string[],
+  path: string,
+  index: number
+): DenseCover | null {
+  if (!isRecord(value)) {
+    warnings.push(`Invalid ${path}; expected record.`);
+    return null;
+  }
+  const id = readString(value.id, `dense-${index}`, warnings, `${path}.id`);
+  const density = clampValue(
+    readNumber(value.density, 0.6, warnings, `${path}.density`),
+    0,
+    1
+  );
+  const polygon = readDenseCoverPolygon(value.polygonLatLon, warnings, `${path}.polygonLatLon`);
+  if (!polygon || polygon.length < 3) {
+    warnings.push(`Invalid ${path}.polygonLatLon; skipping dense cover.`);
+    return null;
+  }
+  return {
+    id,
+    polygonLatLon: polygon,
+    density,
+    mode: "dense_cover"
+  };
+}
+
+function readDenseCoverPolygon(
+  value: unknown,
+  warnings: string[],
+  path: string
+): GeoPoint[] | null {
+  if (!Array.isArray(value)) {
+    warnings.push(`Invalid ${path}; expected array.`);
+    return null;
+  }
+  const points: GeoPoint[] = [];
+  value.forEach((entry) => {
+    if (!isRecord(entry)) {
+      return;
+    }
+    const lat = readNumber(entry.lat, Number.NaN, warnings, `${path}.lat`);
+    const lon = readNumber(entry.lon, Number.NaN, warnings, `${path}.lon`);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      points.push({ lat, lon });
+    }
+  });
+  return points.length >= 3 ? points : null;
 }
 
 function readShape(
@@ -1409,10 +1761,22 @@ function readBuilding(
   }
   const height = readOptionalNumber(value.height, warnings, `${path}.height`);
   const heightM = readOptionalNumber(value.heightM, warnings, `${path}.heightM`);
-  const userHeightMeters = readOptionalNumber(
-    value.userHeightMeters,
-    warnings,
-    `${path}.userHeightMeters`
+  const inferredHeightMeters = normalizeOptionalPositive(
+    readOptionalNumber(value.inferredHeightMeters, warnings, `${path}.inferredHeightMeters`)
+  );
+  const heightSource = readOptionalString(value.heightSource, warnings, `${path}.heightSource`);
+  const confidence = normalizeConfidence(
+    readOptionalNumber(value.confidence, warnings, `${path}.confidence`)
+  );
+  const userOverrideMeters =
+    normalizeOptionalPositive(
+      readOptionalNumber(value.userOverrideMeters, warnings, `${path}.userOverrideMeters`)
+    ) ??
+    normalizeOptionalPositive(
+      readOptionalNumber(value.userHeightMeters, warnings, `${path}.userHeightMeters`)
+    );
+  const effectiveHeightMeters = normalizeOptionalPositive(
+    readOptionalNumber(value.effectiveHeightMeters, warnings, `${path}.effectiveHeightMeters`)
   );
   const tags = mergeTags(
     readTags(value.tags, warnings, `${path}.tags`),
@@ -1423,8 +1787,22 @@ function readBuilding(
   if (resolvedHeight !== undefined) {
     building.height = resolvedHeight;
   }
-  if (userHeightMeters !== undefined) {
-    building.userHeightMeters = userHeightMeters;
+  if (inferredHeightMeters !== undefined) {
+    building.inferredHeightMeters = inferredHeightMeters;
+  }
+  if (heightSource !== undefined) {
+    building.heightSource = heightSource;
+  }
+  if (confidence !== undefined) {
+    building.confidence = confidence;
+  }
+  if (userOverrideMeters !== undefined) {
+    building.userOverrideMeters = userOverrideMeters;
+  }
+  if (effectiveHeightMeters !== undefined) {
+    building.effectiveHeightMeters = effectiveHeightMeters;
+  } else if (inferredHeightMeters !== undefined) {
+    building.effectiveHeightMeters = userOverrideMeters ?? inferredHeightMeters;
   }
   if (tags) {
     building.tags = tags;
@@ -1637,6 +2015,24 @@ function normalizeSignHeightSource(value: unknown): Sign["heightSource"] | null 
     return value;
   }
   return null;
+}
+
+function normalizeOptionalPositive(value: number | undefined): number | undefined {
+  if (!Number.isFinite(value) || (value as number) <= 0) {
+    return undefined;
+  }
+  return value as number;
+}
+
+function normalizeConfidence(value: number | undefined): number | undefined {
+  if (!Number.isFinite(value)) {
+    return undefined;
+  }
+  const numeric = value as number;
+  if (numeric < 0 || numeric > 1) {
+    return undefined;
+  }
+  return numeric;
 }
 
 function normalizePositiveNumber(value: number | undefined, fallback: number): number {

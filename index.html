@@ -154,11 +154,6 @@
               </label>
             </div>
             <div class="panel structure-analysis">
-              <div class="control-buttons">
-                <button id="btnOptimizeStructure" class="primary" type="button">
-                  Optimize placement
-                </button>
-              </div>
               <label class="checkbox-row">
                 <input id="structureSquareToRoad" type="checkbox" />
                 Square to road
@@ -191,6 +186,7 @@
                 <button data-tool="drawCandidatePolygon">Candidate Poly</button>
                 <button data-tool="drawObstaclePolygon">Obstacle Poly</button>
                 <button data-tool="drawObstacleEllipse">Obstacle Ellipse</button>
+                <button data-tool="drawDenseCoverPolygon">Dense Cover Poly</button>
               </div>
             </div>
             <div id="candidateList" class="panel">
@@ -202,6 +198,21 @@
               <div id="candidateItems" class="candidate-items">
                 <div class="hint">No candidate regions yet.</div>
               </div>
+            </div>
+          </li>
+          <li class="workflow-step" data-step="optimize">
+            <h3>7) Optimization</h3>
+            <div class="control-buttons">
+              <button id="btnRunOptimization" class="primary" type="button">
+                Run optimization
+              </button>
+            </div>
+            <div id="optimizationProgress" class="progress-row hidden">
+              <div class="progress-header">
+                <div id="optimizationProgressLabel">Preparing…</div>
+                <button id="btnCancelOptimization" type="button">Cancel</button>
+              </div>
+              <progress id="optimizationProgressBar" max="1" value="0"></progress>
             </div>
           </li>
         </ol>
@@ -268,6 +279,10 @@
                 <span id="inspectBuildingId">--</span>
               </div>
               <div class="value-row">
+                <span>Effective height</span>
+                <span id="inspectEffectiveHeight">--</span>
+              </div>
+              <div class="value-row">
                 <span>Inferred height</span>
                 <span id="inspectInferredHeight">--</span>
               </div>
@@ -275,9 +290,10 @@
                 <span>Source</span>
                 <span id="inspectHeightSource">--</span>
               </div>
-              <label>Override height (m)
-                <input id="inspectHeightMeters" type="number" min="0" step="0.1" />
-              </label>
+              <div class="value-row">
+                <span>Confidence</span>
+                <span id="inspectHeightConfidence">--</span>
+              </div>
               <label>Override height (ft)
                 <input id="inspectHeightFeet" type="number" min="0" step="0.1" />
               </label>
@@ -370,39 +386,16 @@
             <label>Sample step (px)
               <input id="sampleStep" type="number" value="5" min="1" />
             </label>
-
-            <h3>Opacity</h3>
-            <label>Viewer opacity
-              <input id="viewerOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
+            <label>Dense cover density
+              <select id="denseCoverDensity">
+                <option value="0.3">Light (0.3)</option>
+                <option value="0.6">Medium (0.6)</option>
+                <option value="0.9">Heavy (0.9)</option>
+              </select>
             </label>
-            <label>Candidate opacity
-              <input id="candidateOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
+            <label>Forest attenuation k
+              <input id="forestK" type="number" min="0" step="0.01" value="0.04" />
             </label>
-            <label>Obstacle opacity
-              <input id="obstacleOpacity" type="range" min="0" max="1" step="0.05" value="0.85" />
-            </label>
-            <label>Heatmap opacity
-              <input id="heatmapOpacity" type="range" min="0" max="1" step="0.05" value="0.45" />
-            </label>
-            <label>Shading opacity
-              <input id="shadingOpacity" type="range" min="0" max="1" step="0.05" value="0.6" />
-            </label>
-            <label>Contour opacity
-              <input id="contourOpacity" type="range" min="0" max="1" step="0.05" value="0.9" />
-            </label>
-
-            <div class="control-buttons">
-              <button id="btnComputeHeatmap" class="primary">Run analysis</button>
-              <button id="btnComputeShading">Compute blindspots</button>
-              <button id="btnClearHeatmap">Clear heatmap</button>
-              <button id="btnClearShading">Clear blindspots</button>
-              <button id="btnClearShapes">Clear shapes</button>
-            </div>
-
-            <div id="progressContainer" class="hidden">
-              <div id="progressLabel">Computing…</div>
-              <progress id="computeProgress" max="1" value="0"></progress>
-            </div>
 
             <details class="advanced-section">
               <summary>Roads &amp; Traffic</summary>
@@ -433,7 +426,7 @@
 
                 <h3>Epicenter</h3>
                 <div class="control-buttons">
-                  <button id="btnPickEpicenter">Set epicenter by click</button>
+                  <button id="btnPickEpicenter">Manual epicenter override</button>
                 </div>
                 <label>Radius (m)
                   <input id="epicenterRadius" type="range" min="50" max="5000" step="50" value="800" />
@@ -530,7 +523,11 @@
               <label class="import-label">Import predictions JSON
                 <input id="importPredictionsFile" type="file" accept="application/json" />
               </label>
+              <label class="import-label">Import ML trees/signs
+                <input id="importMlTreesFile" type="file" accept="application/json" />
+              </label>
               <button id="btnClearPredictions" type="button">Clear predictions</button>
+              <button id="btnDetectMlFrame" type="button">ML: Detect trees in frame (beta)</button>
             </div>
             <div id="labelStatus" class="status-line">Labels: 0 · Predictions: 0</div>
           </div>
@@ -554,7 +551,7 @@
           <div>
             <h2 id="structureEditorTitle">Structure Editor</h2>
             <p class="hint">
-              Drag corners to resize, drag inside to move, drag the top handle to rotate.
+              Draw a footprint, drag vertices to edit, or pick a front edge for the arc.
             </p>
           </div>
           <button id="structureEditorClose" type="button" class="link-button">
@@ -567,27 +564,129 @@
             <div class="structure-editor-note">Shift snaps rotation to 15 deg.</div>
           </div>
           <aside class="structure-editor-panel panel">
-            <h3>Footprint</h3>
-            <label>Width (ft)
-              <input id="structureEditorWidth" type="number" min="1" step="1" />
-            </label>
-            <label>Length (ft)
-              <input id="structureEditorLength" type="number" min="1" step="1" />
-            </label>
-            <label>Rotation (deg)
-              <input id="structureEditorRotation" type="number" step="1" />
-            </label>
-            <div class="value-row">
-              <span>Width</span>
-              <span id="structureEditorWidthValue">--</span>
+            <div class="structure-editor-tabs">
+              <button
+                type="button"
+                class="tab-button is-active"
+                data-structure-tab="parametric"
+              >
+                Shape
+              </button>
+              <button type="button" class="tab-button" data-structure-tab="imported">
+                Import
+              </button>
             </div>
-            <div class="value-row">
-              <span>Length</span>
-              <span id="structureEditorLengthValue">--</span>
+            <div class="structure-editor-tab-panel is-active" data-structure-panel="parametric">
+              <section class="structure-editor-section">
+                <h3>Tools</h3>
+                <div class="structure-editor-tool-row">
+                  <button type="button" class="tool-button is-active" data-mode="select">Select</button>
+                  <button type="button" class="tool-button" data-mode="draw_polygon">Draw</button>
+                  <button type="button" class="tool-button" data-mode="edit_vertices">Edit</button>
+                  <button type="button" class="tool-button" data-mode="move">Move</button>
+                  <button type="button" class="tool-button" data-mode="rotate">Rotate</button>
+                  <button type="button" class="tool-button" data-mode="face_priority">Face</button>
+                </div>
+                <p class="hint">Click points, double-click to finish a footprint.</p>
+              </section>
+              <section class="structure-editor-section">
+                <h3>Footprint</h3>
+                <div class="value-row">
+                  <span>Perimeter</span>
+                  <span id="structureEditorPerimeterValue">--</span>
+                </div>
+                <div class="value-row">
+                  <span>Area</span>
+                  <span id="structureEditorAreaValue">--</span>
+                </div>
+              </section>
+              <section class="structure-editor-section">
+                <h3>Height</h3>
+                <label>Height (ft)
+                  <input id="structureEditorHeight" type="number" min="1" step="1" />
+                </label>
+                <input
+                  id="structureEditorHeightSlider"
+                  class="structure-editor-slider"
+                  type="range"
+                  min="1"
+                  max="500"
+                  step="1"
+                />
+              </section>
+              <section class="structure-editor-section">
+                <h3>Rotation</h3>
+                <label>Rotation (deg)
+                  <input id="structureEditorRotation" type="number" step="1" />
+                </label>
+              </section>
+              <section class="structure-editor-section">
+                <h3>Face Priority</h3>
+                <div class="structure-editor-arc-row">
+                  <button type="button" class="tool-button" data-arc="180">Arc 180</button>
+                  <button type="button" class="tool-button" data-arc="270">Arc 270</button>
+                </div>
+                <div class="value-row">
+                  <span>Front edge</span>
+                  <span id="structureEditorFrontEdgeValue">None</span>
+                </div>
+              </section>
             </div>
-            <div class="value-row">
-              <span>Area</span>
-              <span id="structureEditorAreaValue">--</span>
+            <div class="structure-editor-tab-panel" data-structure-panel="imported">
+              <section class="structure-editor-section">
+                <h3>Import</h3>
+                <label class="import-label">Model file
+                  <input
+                    id="structureEditorImportFile"
+                    type="file"
+                    accept=".glb,.gltf,.obj,.stl"
+                  />
+                </label>
+                <div class="value-row">
+                  <span>Selected</span>
+                  <span id="structureEditorImportName">None</span>
+                </div>
+                <div class="value-row">
+                  <span>Format</span>
+                  <span id="structureEditorImportFormat">--</span>
+                </div>
+                <p class="hint">GLB/GLTF/OBJ/STL supported. DXF/DWG must be converted to GLB.</p>
+              </section>
+              <section class="structure-editor-section">
+                <h3>Transform</h3>
+                <label>Scale
+                  <input id="structureEditorImportScale" type="number" min="0.001" step="0.01" />
+                </label>
+                <label>Rotation (deg)
+                  <input id="structureEditorImportRotation" type="number" step="1" />
+                </label>
+                <div class="structure-editor-offset-row">
+                  <label>Offset X
+                    <input id="structureEditorImportOffsetX" type="number" step="0.1" />
+                  </label>
+                  <label>Offset Y
+                    <input id="structureEditorImportOffsetY" type="number" step="0.1" />
+                  </label>
+                  <label>Offset Z
+                    <input id="structureEditorImportOffsetZ" type="number" step="0.1" />
+                  </label>
+                </div>
+              </section>
+              <section class="structure-editor-section">
+                <h3>Footprint Proxy</h3>
+                <button
+                  id="structureEditorGenerateProxy"
+                  type="button"
+                  class="tool-button"
+                >
+                  Generate footprint proxy
+                </button>
+                <div class="value-row">
+                  <span>Status</span>
+                  <span id="structureEditorProxyStatus">None</span>
+                </div>
+                <p class="hint">Uses a bounding box projection onto the ground plane.</p>
+              </section>
             </div>
             <div class="structure-editor-actions">
               <button id="structureEditorCancel" type="button">Cancel</button>

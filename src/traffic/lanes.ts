@@ -1,3 +1,5 @@
+import type { TurnDirection } from "./types";
+
 export interface LaneCounts {
   total: number;
   forward: number;
@@ -11,6 +13,9 @@ export interface LaneSource {
   lanesBackward?: number;
   class?: string;
   oneway?: unknown;
+  turnLanes?: string;
+  turnLanesForward?: string;
+  turnLanesBackward?: string;
 }
 
 const HEURISTIC_LANES_BY_CLASS: Record<string, number> = {
@@ -63,6 +68,13 @@ const DEMAND_WEIGHT_BY_CLASS: Record<string, number> = {
   unknown: 0.9
 };
 
+export interface TurnLaneCounts {
+  left: number;
+  right: number;
+  through: number;
+  total: number;
+}
+
 export function parseLaneTag(raw?: string): number | undefined {
   if (!raw) {
     return undefined;
@@ -76,6 +88,72 @@ export function parseLaneTag(raw?: string): number | undefined {
     return undefined;
   }
   return value;
+}
+
+export function parseTurnLaneTag(raw?: string): TurnLaneCounts | null {
+  if (!raw) {
+    return null;
+  }
+  const entries = raw
+    .split("|")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (!entries.length) {
+    return null;
+  }
+  let left = 0;
+  let right = 0;
+  let through = 0;
+  for (const entry of entries) {
+    const directives = entry
+      .split(";")
+      .map((token) => token.trim().toLowerCase())
+      .filter((token) => token.length > 0);
+    const hasThrough = directives.includes("through");
+    const hasLeft = directives.some((token) => token.includes("left"));
+    const hasRight = directives.some((token) => token.includes("right"));
+    if (hasThrough) {
+      through += 1;
+    }
+    if (hasLeft && !hasThrough) {
+      left += 1;
+    }
+    if (hasRight && !hasThrough) {
+      right += 1;
+    }
+  }
+  return { left, right, through, total: entries.length };
+}
+
+export function selectTurnLaneTag(source: LaneSource, direction: "forward" | "backward"): string | undefined {
+  const directional =
+    direction === "forward" ? source.turnLanesForward : source.turnLanesBackward;
+  return directional ?? source.turnLanes;
+}
+
+export function inferDedicatedTurnLane(params: {
+  movement: TurnDirection;
+  incomingLanes: number;
+  straightLanes?: number | null;
+  turnLanesTag?: string;
+}): boolean {
+  if (params.movement === "straight") {
+    return false;
+  }
+  const parsed = parseTurnLaneTag(params.turnLanesTag);
+  if (parsed) {
+    if (params.movement === "left") {
+      return parsed.left > 0;
+    }
+    if (params.movement === "right") {
+      return parsed.right > 0;
+    }
+  }
+  const straightLanes = params.straightLanes ?? null;
+  if (straightLanes && params.incomingLanes > straightLanes) {
+    return true;
+  }
+  return false;
 }
 
 export function inferLanesByClass(roadClass?: string): number {

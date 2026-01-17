@@ -6,6 +6,8 @@ import type { GeoBounds, GeoProjector, TrafficFlowDensity } from "../types";
 import type { TrafficEdgeTraffic } from "../traffic/types";
 import { demandWeightForClass, resolveLaneCounts } from "../traffic/lanes";
 import type { WorldModel } from "../world/worldModel";
+import { getAsset } from "../assets/assetsDb";
+import { loadModelFromBuffer } from "../assets/modelLoader";
 
 export type ThreeViewMode = "idle" | "computing" | "interactive";
 
@@ -55,6 +57,9 @@ const TREE_BASE_OFFSET = 0.02;
 const SIGN_BASE_OFFSET = 0.03;
 const TRAFFIC_BASE_OFFSET = 0.08;
 const MAX_VEHICLES = 1200;
+const FOREST_DENSITY_PER_M2 = 0.012;
+const FOREST_MAX_INSTANCES = 3000;
+const FOREST_PINE_SHARE = 0.6;
 
 const DEFAULT_COLORS = {
   terrain: 0x2f6f3f,
@@ -95,15 +100,18 @@ export function createThreeView(): ThreeView {
   let cameraTween:
     | { start: THREE.Vector3; end: THREE.Vector3; startTime: number; duration: number }
     | null = null;
+  let structureLoadToken = 0;
 
   const rootGroup = new THREE.Group();
   const terrainGroup = new THREE.Group();
   const roadGroup = new THREE.Group();
   const buildingGroup = new THREE.Group();
   const treeGroup = new THREE.Group();
+  const denseCoverGroup = new THREE.Group();
   const signGroup = new THREE.Group();
   const structureGroup = new THREE.Group();
   const trafficGroup = new THREE.Group();
+  const structureOutlineMaterial = new THREE.LineBasicMaterial({ color: DEFAULT_COLORS.structure });
 
   const materials = {
     terrain: new THREE.MeshPhongMaterial({
@@ -146,7 +154,7 @@ export function createThreeView(): ThreeView {
 
   const disposeGroup = (group: THREE.Group) => {
     group.traverse((child: THREE.Object3D) => {
-      if (child instanceof THREE.Mesh || child instanceof THREE.InstancedMesh) {
+      if (child instanceof THREE.Mesh || child instanceof THREE.InstancedMesh || child instanceof THREE.Line) {
         child.geometry?.dispose();
       }
     });
@@ -170,6 +178,66 @@ export function createThreeView(): ThreeView {
   };
 
   const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+  const hashString = (value: string): number => {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i += 1) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  };
+
+  const createSeededRandom = (seed: string): (() => number) => {
+    let state = hashString(seed) || 1;
+    return () => {
+      state = (state * 1664525 + 1013904223) >>> 0;
+      return state / 4294967296;
+    };
+  };
+
+  const polygonArea = (points: Array<{ x: number; z: number }>): number => {
+    let area = 0;
+    for (let i = 0; i < points.length; i += 1) {
+      const next = points[(i + 1) % points.length];
+      area += points[i].x * next.z - next.x * points[i].z;
+    }
+    return area / 2;
+  };
+
+  const polygonBoundsLatLon = (points: Array<{ lat: number; lon: number }>) => {
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLon = Infinity;
+    let maxLon = -Infinity;
+    points.forEach((point) => {
+      minLat = Math.min(minLat, point.lat);
+      maxLat = Math.max(maxLat, point.lat);
+      minLon = Math.min(minLon, point.lon);
+      maxLon = Math.max(maxLon, point.lon);
+    });
+    return { minLat, maxLat, minLon, maxLon };
+  };
+
+  const pointInPolygonLatLon = (
+    point: { lat: number; lon: number },
+    polygon: Array<{ lat: number; lon: number }>
+  ): boolean => {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+      const xi = polygon[i].lon;
+      const yi = polygon[i].lat;
+      const xj = polygon[j].lon;
+      const yj = polygon[j].lat;
+      const intersect =
+        yi > point.lat !== yj > point.lat &&
+        point.lon < ((xj - xi) * (point.lat - yi)) / (yj - yi + Number.EPSILON) + xi;
+      if (intersect) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  };
 
   const getFrameMeters = (bounds: GeoBounds): FrameMeters => {
     const { widthM, heightM } = boundsSizeMeters(bounds);
@@ -507,18 +575,25 @@ export function createThreeView(): ThreeView {
 
   const buildStructure = () => {
     disposeGroup(structureGroup);
+    structureLoadToken += 1;
     const bounds = frameBounds;
     const meters = frameMeters;
-    if (!worldModel?.structure || !bounds || !meters) {
+    const structure = worldModel?.structure;
+    if (!structure || !bounds || !meters) {
       return;
     }
-    const footprint = worldModel.structure.footprint
+    if (structure.mode === "imported" && structure.imported) {
+      const token = structureLoadToken;
+      void buildImportedStructure(structure, token);
+      return;
+    }
+    const footprint = structure.footprint
       .map((point) => projectLatLon(bounds, meters, point.lat, point.lon))
       .filter((point): point is { x: number; z: number } => !!point);
     if (footprint.length < 3) {
       return;
     }
-    const height = Math.max(1, worldModel.structure.heightMeters);
+    const height = Math.max(1, structure.heightMeters);
     const shape = new THREE.Shape();
     shape.moveTo(footprint[0].x, -footprint[0].z);
     for (let i = 1; i < footprint.length; i += 1) {
@@ -531,15 +606,213 @@ export function createThreeView(): ThreeView {
     });
     geometry.rotateX(-Math.PI / 2);
     const centerLat =
-      worldModel.structure.footprint.reduce((sum, point) => sum + point.lat, 0) /
-      worldModel.structure.footprint.length;
+      structure.footprint.reduce((sum, point) => sum + point.lat, 0) / structure.footprint.length;
     const centerLon =
-      worldModel.structure.footprint.reduce((sum, point) => sum + point.lon, 0) /
-      worldModel.structure.footprint.length;
+      structure.footprint.reduce((sum, point) => sum + point.lon, 0) / structure.footprint.length;
     const baseY = sampleElevation(centerLat, centerLon) + STRUCTURE_BASE_OFFSET;
     geometry.translate(0, baseY, 0);
     const mesh = new THREE.Mesh(geometry, materials.structure);
     structureGroup.add(mesh);
+  };
+
+  const buildImportedStructure = async (
+    structure: NonNullable<WorldModel["structure"]>,
+    token: number
+  ) => {
+    const bounds = frameBounds;
+    const meters = frameMeters;
+    if (!structure.imported || !bounds || !meters) {
+      return;
+    }
+    const asset = await getAsset(structure.imported.assetId);
+    if (token !== structureLoadToken || !asset) {
+      return;
+    }
+    const object = await loadModelFromBuffer(asset.data, structure.imported.format);
+    if (token !== structureLoadToken || !object) {
+      return;
+    }
+    const center = resolveStructureCenter(structure);
+    if (!center) {
+      return;
+    }
+    const centerPosition = projectLatLonWithHeight(center.lat, center.lon);
+    if (!centerPosition) {
+      return;
+    }
+    const scale =
+      Number.isFinite(structure.imported.scale) && structure.imported.scale > 0
+        ? structure.imported.scale
+        : 1;
+    const rotationDeg = Number.isFinite(structure.imported.rotationDeg)
+      ? structure.imported.rotationDeg
+      : 0;
+    const rotation = (rotationDeg * Math.PI) / 180;
+    const offset = structure.imported.offset ?? { x: 0, y: 0, z: 0 };
+    const offsetX = Number.isFinite(offset.x) ? offset.x : 0;
+    const offsetY = Number.isFinite(offset.y) ? offset.y : 0;
+    const offsetZ = Number.isFinite(offset.z) ? offset.z : 0;
+    const pivot = new THREE.Group();
+    const rotationGroup = new THREE.Group();
+    const offsetGroup = new THREE.Group();
+    rotationGroup.rotation.y = rotation;
+    rotationGroup.scale.setScalar(scale);
+    offsetGroup.position.set(offsetX, offsetY, offsetZ);
+    offsetGroup.add(object);
+    rotationGroup.add(offsetGroup);
+    pivot.add(rotationGroup);
+    pivot.position.set(centerPosition.x, centerPosition.y + STRUCTURE_BASE_OFFSET, centerPosition.z);
+    structureGroup.add(pivot);
+
+    if (structure.footprint.length >= 3) {
+      const outlinePoints = structure.footprint
+        .map((point) => projectLatLon(bounds, meters, point.lat, point.lon))
+        .filter((point): point is { x: number; z: number } => !!point);
+      if (outlinePoints.length >= 3) {
+        const outline = new THREE.BufferGeometry().setFromPoints(
+          outlinePoints.map(
+            (point) => new THREE.Vector3(point.x, centerPosition.y + STRUCTURE_BASE_OFFSET, point.z)
+          )
+        );
+        const line = new THREE.LineLoop(outline, structureOutlineMaterial);
+        structureGroup.add(line);
+      }
+    }
+    requestRender();
+  };
+
+  const resolveStructureCenter = (structure: NonNullable<WorldModel["structure"]>) => {
+    if (structure.center) {
+      return structure.center;
+    }
+    if (structure.footprint.length === 0) {
+      return null;
+    }
+    const lat =
+      structure.footprint.reduce((sum, point) => sum + point.lat, 0) / structure.footprint.length;
+    const lon =
+      structure.footprint.reduce((sum, point) => sum + point.lon, 0) / structure.footprint.length;
+    return { lat, lon };
+  };
+
+  const buildDenseCoverForest = () => {
+    disposeGroup(denseCoverGroup);
+    const bounds = frameBounds;
+    const meters = frameMeters;
+    if (!worldModel || !bounds || !meters) {
+      return;
+    }
+    const pinePoints: Array<{ lat: number; lon: number; height: number; radius: number }> = [];
+    const deciduousPoints: Array<{ lat: number; lon: number; height: number; radius: number }> = [];
+
+    for (const dense of worldModel.denseCover) {
+      if (dense.polygon.length < 3) {
+        continue;
+      }
+      const projected = dense.polygon
+        .map((point) => projectLatLon(bounds, meters, point.lat, point.lon))
+        .filter((point): point is { x: number; z: number } => !!point);
+      if (projected.length < 3) {
+        continue;
+      }
+      const area = Math.abs(polygonArea(projected));
+      if (!Number.isFinite(area) || area <= 0) {
+        continue;
+      }
+      const targetCount = Math.min(
+        FOREST_MAX_INSTANCES,
+        Math.round(area * dense.density * FOREST_DENSITY_PER_M2)
+      );
+      if (targetCount <= 0) {
+        continue;
+      }
+      const polyBounds = polygonBoundsLatLon(dense.polygon);
+      const rng = createSeededRandom(dense.id);
+      const maxAttempts = targetCount * 12;
+      let attempts = 0;
+      while ((pinePoints.length + deciduousPoints.length) < FOREST_MAX_INSTANCES && attempts < maxAttempts) {
+        attempts += 1;
+        const lat = polyBounds.minLat + (polyBounds.maxLat - polyBounds.minLat) * rng();
+        const lon = polyBounds.minLon + (polyBounds.maxLon - polyBounds.minLon) * rng();
+        if (!pointInPolygonLatLon({ lat, lon }, dense.polygon)) {
+          continue;
+        }
+        const isPine = rng() < FOREST_PINE_SHARE;
+        const height = isPine ? lerp(6, 14, rng()) : lerp(5, 11, rng());
+        const radius = isPine ? lerp(0.6, 1.6, rng()) : lerp(0.8, 1.9, rng());
+        if (isPine) {
+          pinePoints.push({ lat, lon, height, radius });
+        } else {
+          deciduousPoints.push({ lat, lon, height, radius });
+        }
+        if (pinePoints.length + deciduousPoints.length >= targetCount) {
+          break;
+        }
+      }
+    }
+
+    if (pinePoints.length) {
+      const geometry = new THREE.ConeGeometry(1, 1, 8);
+      const mesh = new THREE.InstancedMesh(geometry, materials.tree, pinePoints.length);
+      const matrix = new THREE.Matrix4();
+      pinePoints.forEach((tree, index) => {
+        const position = projectLatLonWithHeight(tree.lat, tree.lon);
+        if (!position) {
+          return;
+        }
+        const y = position.y + tree.height / 2 + TREE_BASE_OFFSET;
+        matrix.compose(
+          new THREE.Vector3(position.x, y, position.z),
+          new THREE.Quaternion(),
+          new THREE.Vector3(tree.radius, tree.height, tree.radius)
+        );
+        mesh.setMatrixAt(index, matrix);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      denseCoverGroup.add(mesh);
+    }
+
+    if (deciduousPoints.length) {
+      const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.6, 1, 6);
+      const canopyGeometry = new THREE.SphereGeometry(0.8, 8, 8);
+      const trunkMesh = new THREE.InstancedMesh(
+        trunkGeometry,
+        materials.treeTrunk,
+        deciduousPoints.length
+      );
+      const canopyMesh = new THREE.InstancedMesh(
+        canopyGeometry,
+        materials.tree,
+        deciduousPoints.length
+      );
+      const matrix = new THREE.Matrix4();
+      deciduousPoints.forEach((tree, index) => {
+        const position = projectLatLonWithHeight(tree.lat, tree.lon);
+        if (!position) {
+          return;
+        }
+        const trunkHeight = tree.height * 0.45;
+        const canopyRadius = tree.radius * 1.4;
+        const trunkY = position.y + trunkHeight / 2 + TREE_BASE_OFFSET;
+        matrix.compose(
+          new THREE.Vector3(position.x, trunkY, position.z),
+          new THREE.Quaternion(),
+          new THREE.Vector3(tree.radius * 0.35, trunkHeight, tree.radius * 0.35)
+        );
+        trunkMesh.setMatrixAt(index, matrix);
+        const canopyY = position.y + trunkHeight + canopyRadius * 0.8 + TREE_BASE_OFFSET;
+        matrix.compose(
+          new THREE.Vector3(position.x, canopyY, position.z),
+          new THREE.Quaternion(),
+          new THREE.Vector3(canopyRadius, canopyRadius, canopyRadius)
+        );
+        canopyMesh.setMatrixAt(index, matrix);
+      });
+      trunkMesh.instanceMatrix.needsUpdate = true;
+      canopyMesh.instanceMatrix.needsUpdate = true;
+      denseCoverGroup.add(trunkMesh);
+      denseCoverGroup.add(canopyMesh);
+    }
   };
 
   const buildTrees = () => {
@@ -647,6 +920,7 @@ export function createThreeView(): ThreeView {
     buildRoads();
     buildBuildings();
     buildStructure();
+    buildDenseCoverForest();
     buildTrees();
     buildSigns();
     requestRender();
@@ -850,7 +1124,16 @@ export function createThreeView(): ThreeView {
       const hemi = new THREE.HemisphereLight(0x8fb7ff, 0x20242b, 0.35);
       scene.add(ambient, sun, hemi);
 
-      rootGroup.add(terrainGroup, roadGroup, buildingGroup, treeGroup, signGroup, structureGroup, trafficGroup);
+      rootGroup.add(
+        terrainGroup,
+        roadGroup,
+        buildingGroup,
+        denseCoverGroup,
+        treeGroup,
+        signGroup,
+        structureGroup,
+        trafficGroup
+      );
       scene.add(rootGroup);
 
       resizeObserver = new ResizeObserver(() => {
@@ -949,11 +1232,12 @@ export function createThreeView(): ThreeView {
       disposeGroup(terrainGroup);
       disposeGroup(roadGroup);
       disposeGroup(buildingGroup);
-    disposeGroup(treeGroup);
-    disposeGroup(signGroup);
-    disposeGroup(structureGroup);
-    disposeTraffic();
-    Object.values(materials).forEach((material) => material.dispose());
+      disposeGroup(denseCoverGroup);
+      disposeGroup(treeGroup);
+      disposeGroup(signGroup);
+      disposeGroup(structureGroup);
+      disposeTraffic();
+      Object.values(materials).forEach((material) => material.dispose());
       resizeObserver?.disconnect();
       resizeObserver = null;
       controls?.dispose();
